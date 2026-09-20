@@ -1,0 +1,7 @@
+public static class connectorInfo {
+	public List<String> predecessor;
+	public List<String> successor;
+	public String leftLane;
+	public String rightLane;
+}
+
