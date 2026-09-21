@@ -17,6 +17,7 @@ def update_vehicle_dynamic_cache(all_vehicle_states, previous_cache):
         x = _field(position, "longitude")
         y = _field(position, "latitude")
         raw_speed = _field(state, "speed", 0)
+        accuracy_level = max(0.0, float(_field(state, "posAccuracy", 0) or 0))
         updated[str(vehicle_id)] = {
             "valid": x is not None and y is not None,
             "position": np.asarray([
@@ -24,6 +25,8 @@ def update_vehicle_dynamic_cache(all_vehicle_states, previous_cache):
                 float("nan") if y is None else float(y),
             ]),
             "posAccuracy": _field(state, "posAccuracy"),
+            "lateralUncertainty": 0.2 * accuracy_level,
+            "longitudinalUncertainty": 0.5 * accuracy_level,
             "speed": 0.0 if raw_speed == 8191 else max(0.0, float(raw_speed) * 0.02),
             "heading": float(_field(state, "heading", 0.0)),
             "direction": int(_field(state, "direction", 1)),

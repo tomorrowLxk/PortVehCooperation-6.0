@@ -5,6 +5,9 @@ from collections import deque
 import numpy as np
 
 from parameters import (
+    DRIVABLE_LINE_FORWARD_LENGTH,
+    DRIVABLE_LINE_MAX_COUNT,
+    DRIVABLE_LINE_POINT_SPACING,
     FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE,
     FEASIBLE_DOMAIN_LANE_CHANGE_DISTANCE,
     FEASIBLE_DOMAIN_SEARCH_DEPTH,
@@ -35,10 +38,22 @@ class DrivableAreaPlanner:
         lane_ids = list(referLaneIds)
         route = np.asarray(referLine, dtype=float)[:, :2].copy()
         forbidden = set(forbiddenLaneIds or [])
+        normalized_connectors = {}
+        for lane_id, source in connector_dict.items():
+            info = dict(source)
+            info['predecessor'] = list(info['predecessor'])
+            info['successor'] = list(info['successor'])
+            info['left_lane'] = info.get(
+                'left_lane', info.get('leftLane')
+            )
+            info['right_lane'] = info.get(
+                'right_lane', info.get('rightLane')
+            )
+            normalized_connectors[lane_id] = info
 
         centerlines, connectors, route_stages, connection_bounds = (
             self._build_complete_feasible_domain(
-                connector_dict,
+                normalized_connectors,
                 centerline_dict,
                 lane_ids,
                 route,
@@ -58,6 +73,22 @@ class DrivableAreaPlanner:
             self.routeStageReferenceLaneIds,
         ) = self._build_route_stage_context()
 
+        temporary_forward_lanes = {
+            lane_id for lane_id in self.connector_dict
+            if lane_id.endswith('__DXM_FORWARD')
+        }
+        temporary_reverse_lanes = {
+            lane_id for lane_id in self.connector_dict
+            if lane_id.endswith('__DXM_REVERSE')
+        }
+        dxm_protected_lanes = (
+                temporary_forward_lanes | temporary_reverse_lanes
+        )
+        for lane_id in temporary_forward_lanes:
+            dxm_protected_lanes.update(
+                self.connector_dict[lane_id]['predecessor']
+            )
+        self.dxmProtectedLaneIds = frozenset(dxm_protected_lanes)
         self.is_dxm_update_protected = False
         self.lastLaneId = None
         self.lastLaneS = None
@@ -201,11 +232,13 @@ class DrivableAreaPlanner:
         segments = np.diff(line, axis=0)
         lengths = np.linalg.norm(segments, axis=1)
         relative = point - line[:-1]
-        ratio = np.clip(
-            np.sum(relative * segments, axis=1) / (lengths * lengths),
-            0.0,
-            1.0,
+        ratio = np.divide(
+            np.sum(relative * segments, axis=1),
+            lengths * lengths,
+            out=np.zeros_like(lengths),
+            where=lengths > 1e-12,
         )
+        ratio = np.clip(ratio, 0.0, 1.0)
         projections = line[:-1] + ratio[:, None] * segments
         distances = np.linalg.norm(projections - point, axis=1)
         index = int(np.argmin(distances))
@@ -223,7 +256,8 @@ class DrivableAreaPlanner:
         def point_at(target_s):
             index = min(int(np.searchsorted(arc, target_s, side='right') - 1),
                         len(lengths) - 1)
-            ratio = (target_s - arc[index]) / lengths[index]
+            ratio = (0.0 if lengths[index] <= 1e-12 else
+                     (target_s - arc[index]) / lengths[index])
             return line[index] + ratio * (line[index + 1] - line[index])
 
         points = [point_at(start_s)]
@@ -283,9 +317,15 @@ class DrivableAreaPlanner:
             np.cos(first - second),
         )))
 
-    def _position_match_candidates(self, initial):
-        if initial or self.lastLaneId is None:
-            return set(self.routeStages[0])
+    def _update_dxm_protection(self):
+        "根据最近一次成功匹配的车道统一维护调箱门更新保护状态。"
+        self.is_dxm_update_protected = (
+            self.lastLaneId in self.dxmProtectedLaneIds
+        )
+
+    def _position_match_candidates(self):
+        if self.lastLaneId is None:
+            return {self.referLaneIds[0]}
 
         candidates = {self.lastLaneId}
         frontier = {self.lastLaneId}
@@ -346,7 +386,39 @@ class DrivableAreaPlanner:
             self.reverseStageIndex = self._find_reverse_stage(reverse_point)
 
         ranked = []
-        for lane in self._position_match_candidates(initial):
+        if initial:
+            first_lane = self.referLaneIds[0]
+            initial_lanes = [first_lane]
+            feasible_lanes = {
+                lane for stage in self.routeStages for lane in stage
+            }
+            initial_lanes.extend(
+                lane
+                for lane in self.connector_dict[first_lane]['successor']
+                if lane in feasible_lanes
+            )
+
+            for candidate_order, lane in enumerate(initial_lanes):
+                lane_s, distance = self._project_to_line(
+                    position, self.centerline_dict[lane]
+                )
+                stage_index = next(
+                    index for index, stage in enumerate(self.routeStages)
+                    if lane in stage
+                )
+                ranked.append((
+                    distance,
+                    candidate_order,
+                    distance,
+                    stage_index,
+                    lane,
+                    lane_s,
+                ))
+            match_candidates = ()
+        else:
+            match_candidates = self._position_match_candidates()
+
+        for lane in match_candidates:
             line = self.centerline_dict[lane]
             lane_s, distance = self._project_to_line(position, line)
             if distance > VEHICLE_LANE_LOCATE_MAX_DISTANCE:
@@ -371,8 +443,7 @@ class DrivableAreaPlanner:
             occurrences = [
                 index for index, stage in enumerate(self.routeStages)
                 if lane in stage
-                   and (self.lastRouteStageIndex is None
-                        or index >= self.lastRouteStageIndex)
+                   and index >= self.lastRouteStageIndex
             ]
             for stage_index in occurrences:
                 if (self.reverseStageIndex is not None
@@ -457,20 +528,7 @@ class DrivableAreaPlanner:
             else max(self.lastRouteS, route_s)
         )
 
-        temporary_forward = {
-            lane_id for lane_id in self.connector_dict
-            if lane_id.endswith('__DXM_FORWARD')
-        }
-        temporary_reverse = {
-            lane_id for lane_id in self.connector_dict
-            if lane_id.endswith('__DXM_REVERSE')
-        }
-        protected_lanes = temporary_forward | temporary_reverse
-        for lane_id in temporary_forward:
-            protected_lanes.update(
-                self.connector_dict[lane_id]['predecessor']
-            )
-        self.is_dxm_update_protected = lane in protected_lanes
+        self._update_dxm_protection()
 
         return {
             'laneId': lane,
@@ -769,10 +827,205 @@ class DrivableAreaPlanner:
             connection_bounds,
         )
 
+    @staticmethod
+    def _line_length(line):
+        return float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
+
+    @staticmethod
+    def _resample_line(line, spacing):
+        segment_lengths = np.linalg.norm(np.diff(line, axis=0), axis=1)
+        cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+        total = float(cumulative[-1])
+        sample_s = np.arange(0.0, total, spacing)
+        if len(sample_s) == 0 or total - sample_s[-1] > 1e-8:
+            sample_s = np.append(sample_s, total)
+        else:
+            sample_s[-1] = total
+
+        segment_indexes = np.searchsorted(
+            cumulative, sample_s, side='right'
+        ) - 1
+        segment_indexes = np.clip(
+            segment_indexes, 0, len(segment_lengths) - 1
+        )
+        ratios = np.divide(
+            sample_s - cumulative[segment_indexes],
+            segment_lengths[segment_indexes],
+            out=np.zeros_like(sample_s),
+            where=segment_lengths[segment_indexes] > 1e-12,
+        )
+        return (
+            line[segment_indexes]
+            + ratios[:, None]
+            * (line[segment_indexes + 1] - line[segment_indexes])
+        )
+
+    def _lane_distance(self, first_lane, second_lane, stage_index):
+        if first_lane == second_lane:
+            return 0
+        stage_lanes = set(self.routeStages[stage_index])
+        queue = deque([(first_lane, 0)])
+        visited = {first_lane}
+        while queue:
+            lane, distance = queue.popleft()
+            info = self.connector_dict[lane]
+            for neighbour, reverse_key in (
+                    (info['left_lane'], 'right_lane'),
+                    (info['right_lane'], 'left_lane')):
+                if (neighbour not in stage_lanes
+                        or neighbour in visited
+                        or self.connector_dict[neighbour][reverse_key] != lane):
+                    continue
+                if neighbour == second_lane:
+                    return distance + 1
+                visited.add(neighbour)
+                queue.append((neighbour, distance + 1))
+        return None
+
+    def _line_similarity(self, line):
+        return float(np.mean([
+            self._project_to_line(point, self.referLine)[1]
+            for point in line
+        ]))
+
+    def _planning_target(self, current_stage_index, reverse_point):
+        route_length = self._line_length(self.referLine)
+        phase_end_s = route_length
+        if (reverse_point is not None
+                and not self.passedReversePoint
+                and self.reverseStageIndex is not None):
+            phase_end_s = min(
+                phase_end_s,
+                self.routeStageBounds[self.reverseStageIndex][1],
+            )
+
+        target_route_s = min(
+            self.lastRouteS + DRIVABLE_LINE_FORWARD_LENGTH,
+            phase_end_s,
+        )
+        target_stage_index = current_stage_index
+        for index in range(current_stage_index, len(self.routeStageBounds)):
+            if target_route_s <= self.routeStageBounds[index][1] + 1e-6:
+                target_stage_index = index
+                break
+
+        if (reverse_point is not None
+                and not self.passedReversePoint
+                and abs(target_route_s - phase_end_s) <= 1e-6):
+            target_point = np.asarray(reverse_point, dtype=float)[:2]
+        else:
+            target_point = self._slice_line(
+                self.referLine, target_route_s, target_route_s
+            )[0]
+        return target_stage_index, target_point
+
+    def _target_lane_ends(self, target_stage_index, target_point):
+        target_ends = {}
+        for lane, lane_range in self.routeStages[target_stage_index].items():
+            lane_s, _ = self._project_to_line(
+                target_point, self.centerline_dict[lane]
+            )
+            if (lane_range['startS'] - 1e-6
+                    <= lane_s
+                    <= lane_range['endS'] + 1e-6):
+                target_ends[lane] = min(
+                    max(lane_s, lane_range['startS']),
+                    lane_range['endS'],
+                )
+        return target_ends
+
+    def _backward_viable_lanes(self, current_stage_index,
+                               target_stage_index, target_lanes):
+        viable = {target_stage_index: set(target_lanes)}
+        for index in range(target_stage_index - 1,
+                           current_stage_index - 1, -1):
+            next_lanes = viable[index + 1]
+            viable[index] = {
+                lane for lane in self.routeStages[index]
+                if any(
+                    successor in next_lanes
+                    for successor in self.connector_dict[lane]['successor']
+                )
+            }
+        return viable
+
+    def _build_drivable_line(self, first_lane, current_position,
+                             lateral_distance, current_stage_index,
+                             target_stage_index, target_ends, viable):
+        lane = first_lane
+        previous_lane = None
+        parts = []
+
+        for stage_index in range(current_stage_index,
+                                 target_stage_index + 1):
+            lane_range = self.routeStages[stage_index][lane]
+            line = self.centerline_dict[lane]
+
+            if stage_index == current_stage_index:
+                projected_s, _ = self._project_to_line(
+                    current_position, line
+                )
+                start_s = max(
+                    lane_range['startS'],
+                    projected_s
+                    + lateral_distance
+                    * FEASIBLE_DOMAIN_LANE_CHANGE_DISTANCE,
+                )
+            else:
+                start_s = lane_range['startS']
+                connection = self.connectionBounds.get(
+                    (previous_lane, lane)
+                )
+                if connection is not None:
+                    start_s = max(start_s, connection['toStartS'])
+
+            next_lane = None
+            if stage_index == target_stage_index:
+                end_s = target_ends[lane]
+            else:
+                successors = [
+                    successor
+                    for successor in self.connector_dict[lane]['successor']
+                    if successor in viable[stage_index + 1]
+                ]
+                if not successors:
+                    return None
+                next_lane = min(
+                    successors,
+                    key=lambda successor: self._line_similarity(
+                        self.routeStages[stage_index + 1][successor][
+                            'centerline'
+                        ]
+                    ),
+                )
+                end_s = lane_range['endS']
+                connection = self.connectionBounds.get((lane, next_lane))
+                if connection is not None:
+                    end_s = min(end_s, connection['fromEndS'])
+
+            if end_s > start_s + 1e-6:
+                part = self._slice_line(line, start_s, end_s)
+                if parts and np.linalg.norm(parts[-1][-1] - part[0]) < 1e-6:
+                    part = part[1:]
+                if len(part):
+                    parts.append(part)
+
+            previous_lane = lane
+            lane = next_lane
+
+        if not parts:
+            return None
+        result = np.concatenate(parts)
+        if len(result) < 2 or self._line_length(result) <= 1e-6:
+            return None
+        return self._resample_line(
+            result, DRIVABLE_LINE_POINT_SPACING
+        )
+
     def plan(self, currentPosition, currentHeading=0.0,
              currentSpeed=0.0, reversePoint=None):
         "更新本帧位置匹配；局部可行线将在下一阶段实现。"
-        self._update_position_match(
+        location = self._update_position_match(
             {
                 'valid': True,
                 'position': currentPosition,
@@ -782,7 +1035,57 @@ class DrivableAreaPlanner:
             reversePoint,
             initial=False,
         )
-        return []
+        if location is None:
+            return []
+
+        current_position = np.asarray(currentPosition, dtype=float)[:2]
+        current_stage_index = location['stageIndex']
+        target_stage_index, target_point = self._planning_target(
+            current_stage_index, reversePoint
+        )
+        target_ends = self._target_lane_ends(
+            target_stage_index, target_point
+        )
+        if not target_ends:
+            return []
+        viable = self._backward_viable_lanes(
+            current_stage_index,
+            target_stage_index,
+            target_ends,
+        )
+
+        candidates = []
+        for lane in viable[current_stage_index]:
+            lateral_distance = self._lane_distance(
+                self.lastLaneId, lane, current_stage_index
+            )
+            if lateral_distance is None:
+                continue
+            line = self._build_drivable_line(
+                lane,
+                current_position,
+                lateral_distance,
+                current_stage_index,
+                target_stage_index,
+                target_ends,
+                viable,
+            )
+            if line is None:
+                continue
+            candidates.append((
+                lane,
+                line,
+                self._line_similarity(line),
+            ))
+
+        candidates.sort(key=lambda item: (
+            0 if item[0] == self.lastLaneId else 1,
+            item[2],
+            item[0],
+        ))
+        return [
+            line for _, line, _ in candidates[:DRIVABLE_LINE_MAX_COUNT]
+        ]
 
     def set_progress_at_point(self, point):
         "车辆到达调箱门倒车点后，将匹配进度切换到下游反向stage。"
@@ -831,7 +1134,4 @@ class DrivableAreaPlanner:
         self.lastLaneId = lane
         self.lastLaneS = lane_s
         self.lastRouteStageIndex = next_stage
-        self.is_dxm_update_protected = (
-                lane.endswith('__DXM_FORWARD')
-                or lane.endswith('__DXM_REVERSE')
-        )
+        self._update_dxm_protection()

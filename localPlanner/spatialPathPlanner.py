@@ -1,365 +1,969 @@
-"""Unified single-vehicle spatial path planning for PortVehCooperation 4.0.
-
-This module deliberately stops before speed and waypoint generation.  It keeps
-S/P/G/T/R nodes, XY Hermite cross-line connectors, forward dynamic
-programming and one optimum per non-homotopic line sequence.
-"""
-from __future__ import annotations
+"""单车PTGR空间图、懒曲线验证与候选path生成。"""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+import heapq
+import math
 
 import numpy as np
 
-from localPlanner.spatialPathGraph import build_spatial_graph, path_curvatures
-from tools.path_corridor_collision import blocked_path_intervals
-from tools.default_params import DEFAULT_PLANNING_PARAMS
-from tools.path_geometry import (
-    arc_lengths, as_xy, project_points_to_polyline, project_to_polyline, resample_polyline,
-    truncate_polyline)
+from localPlanner.pathCollision import (
+    first_polygon_stop_s,
+    interval_contains,
+    interval_crossed,
+    line_blocked_intervals,
+    path_vehicle_intersects,
+)
+from localPlanner.pathGeometry import (
+    append_polyline,
+    clean_xy,
+    frenet_hermite_connector,
+    frenet_connector,
+    hermite_connector,
+    path_curvatures,
+    project_points_to_polyline,
+    resample_polyline,
+    truncate_polyline,
+)
+from parameters import (
+    PATH_CURVATURE_TOLERANCE,
+    PATH_CURVATURE_WINDOW,
+    PATH_COLLISION_SAMPLE_SPACING,
+    PATH_CURVE_SAMPLE_SPACING,
+    PATH_G0_LATERAL_TOLERANCE,
+    PATH_GRAPH_START_OFFSET,
+    PATH_LANE_CHANGE_LONGITUDINAL_RATIO,
+    PATH_LATERAL_SAFETY_MARGIN,
+    PATH_MAX_CANDIDATES,
+    PATH_MAX_GRAPH_ITERATIONS,
+    PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE,
+    PATH_MAX_LATERAL_CONNECTION_DISTANCE,
+    PATH_MAX_SIGNATURES_PER_NODE,
+    PATH_NODE_SPACING,
+    PATH_OBSTACLE_REAR_CLEARANCE,
+    PATH_OUTPUT_POINT_SPACING,
+    PATH_REFERENCE_WEIGHT,
+    PATH_STATIC_STOP_DISTANCE,
+)
 
 
-@dataclass(frozen=True)
+@dataclass
 class PathCandidate:
     xy: np.ndarray
     score: float
     lineSequence: tuple
     maxCurvature: float
     terminalStop: bool = False
-    terminalReason: Optional[str] = None
+    terminalReason: str | None = None
     degraded: bool = False
-    degradationReason: Optional[str] = None
+    degradationReason: str | None = None
 
 
 @dataclass
 class PathPlanResult:
     success: bool
-    failureReason: Optional[str] = None
-    candidates: List[PathCandidate] = field(default_factory=list)
+    candidates: list[PathCandidate] = field(default_factory=list)
+    failureReason: str | None = None
 
 
-@dataclass(frozen=True)
-class AGVPathPlanningJob:
-    vehicleId: str
-    drivableAreaPlanner: Any
-    position: np.ndarray
-    heading: float
-    speed: float
-    globalReferenceLine: np.ndarray
-    obstacles: Sequence[Any]
-    vehicleStaticInfo: Dict[str, float]
-    longitudinalUncertainty: float = 0.0
-    lateralUncertainty: float = 0.0
-    reversePoint: Optional[np.ndarray] = None
-    stopAtRouteEnd: bool = False
-    drivableLines: Optional[Sequence[np.ndarray]] = None
+@dataclass
+class _Node:
+    id: str
+    point: np.ndarray
+    progress: float
+    lateral: float
+    referenceS: float
+    referenceLateral: float
+    roles: set[str] = field(default_factory=set)
+    lineS: dict[int, float] = field(default_factory=dict)
+    headings: dict[int, float] = field(default_factory=dict)
+
+
+@dataclass
+class _Edge:
+    id: int
+    source: str
+    target: str
+    sourceLine: int | None
+    targetLine: int
+    kind: str
+    geometry: np.ndarray | None = None
+    state: str = "UNKNOWN"
+    maxCurvature: float = 0.0
+    cost: float = 0.0
+
+
+@dataclass
+class _Graph:
+    lines: list[np.ndarray]
+    lineMetrics: list
+    referenceLine: np.ndarray
+    nodes: dict[str, _Node]
+    edges: dict[int, _Edge]
+    adjacency: dict[str, list[int]]
+    goals: list[str]
+    stops: list[str]
+    primaryLine: int | None
+    currentLine: int
+
+
+@dataclass
+class _LineMetric:
+    """一次规划内复用的折线弧长、方向和投影数据。"""
+    points: np.ndarray
+    arc: np.ndarray
+    segments: np.ndarray
+    segmentLengths: np.ndarray
+    headings: np.ndarray
+
+    @classmethod
+    def from_line(cls, line):
+        points = clean_xy(line)
+        segments = np.diff(points, axis=0)
+        segment_lengths = np.linalg.norm(segments, axis=1)
+        arc = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+        headings = np.arctan2(segments[:, 1], segments[:, 0])
+        return cls(points, arc, segments, segment_lengths, headings)
+
+    @property
+    def total(self):
+        return float(self.arc[-1])
+
+    def values_at(self, values):
+        targets = np.clip(
+            np.asarray(values, dtype=float), 0.0, self.arc[-1])
+        indices = np.minimum(
+            np.searchsorted(self.arc, targets, side="right") - 1,
+            len(self.points) - 2,
+        )
+        indices = np.maximum(indices, 0)
+        lengths = self.segmentLengths[indices]
+        ratios = np.divide(
+            targets - self.arc[indices], lengths,
+            out=np.zeros(len(targets), dtype=float),
+            where=lengths > 1e-12,
+        )
+        points = (
+            self.points[indices]
+            + ratios[:, None] * self.segments[indices]
+        )
+        return points, self.headings[indices]
+
+    def project_many(self, query_points):
+        queries = np.asarray(query_points, dtype=float).reshape(-1, 2)
+        lengths_squared = self.segmentLengths * self.segmentLengths
+        residuals = queries[:, None, :] - self.points[:-1][None, :, :]
+        ratios = np.divide(
+            np.sum(residuals * self.segments[None, :, :], axis=2),
+            lengths_squared[None, :],
+            out=np.zeros((len(queries), len(self.segments)), dtype=float),
+            where=lengths_squared[None, :] > 1e-12,
+        )
+        ratios = np.clip(ratios, 0.0, 1.0)
+        projections = (
+            self.points[:-1][None, :, :]
+            + ratios[:, :, None] * self.segments[None, :, :]
+        )
+        differences = queries[:, None, :] - projections
+        distances_squared = np.sum(differences * differences, axis=2)
+        indices = np.argmin(distances_squared, axis=1)
+        rows = np.arange(len(queries))
+        lengths = self.segmentLengths[indices]
+        tangents = np.divide(
+            self.segments[indices], lengths[:, None],
+            out=np.tile(np.asarray([[1.0, 0.0]]), (len(queries), 1)),
+            where=lengths[:, None] > 1e-12,
+        )
+        residual = differences[rows, indices]
+        return {
+            "s": self.arc[indices] + ratios[rows, indices] * lengths,
+            "d": tangents[:, 0] * residual[:, 1]
+                 - tangents[:, 1] * residual[:, 0],
+            "distance": np.sqrt(distances_squared[rows, indices]),
+            "point": projections[rows, indices],
+            "tangent": tangents,
+            "segmentIndex": indices,
+        }
+
+    def project(self, point):
+        values = self.project_many(np.asarray(point, dtype=float)[:2])
+        return {
+            key: (value[0].copy() if isinstance(value[0], np.ndarray)
+                  else float(value[0]))
+            for key, value in values.items()
+        }
+
+    def slice(self, start_s, end_s):
+        start = float(np.clip(start_s, 0.0, self.arc[-1]))
+        end = float(np.clip(end_s, start, self.arc[-1]))
+        boundaries, _ = self.values_at([start, end])
+        mask = (self.arc > start + 1e-9) & (self.arc < end - 1e-9)
+        middle = self.points[mask]
+        if end <= start + 1e-9:
+            return boundaries[:1]
+        return clean_xy(np.vstack((boundaries[0], middle, boundaries[1])))
 
 
 def plan_spatial_path(
-    drivable_lines,
-    position,
-    heading,
-    global_reference_line,
-    obstacles,
-    vehicle_static_info,
-    longitudinal_uncertainty=0.0,
-    lateral_uncertainty=0.0,
-    reverse_point=None,
-    stop_at_route_end=False,
-    params=None,
-) -> PathPlanResult:
-    """Plan one vehicle independently; no vehicle state is retained."""
-    planning_params = dict(DEFAULT_PLANNING_PARAMS)
-    if params:
-        planning_params.update(params)
-    current = np.asarray(position, dtype=float).reshape(-1)[:2]
-    if current.shape != (2,) or not np.all(np.isfinite(current)):
-        return PathPlanResult(False, "INVALID_VEHICLE_POSITION")
-    reference = as_xy(global_reference_line)
-    if reverse_point is not None and np.linalg.norm(
-            current-np.asarray(reverse_point, dtype=float)[:2]) <= 1e-6:
-        return PathPlanResult(True, candidates=[PathCandidate(
-            current.reshape(1, 2), 0.0, (), 0.0, True, "REVERSE_POINT")])
-    # 到达全局终点时futurePath退化成一个位置；仍返回成功的停车path，
-    # 不能将重复坐标去重后的单点误判为缺少可行线/参考线。
-    destination_tolerance = max(
-        1e-6, float(planning_params["responseDestinationTolerance"]))
+        drivable_lines, current_position, current_heading, reference_line,
+        polygons, vehicle_static_info, vehicle_dynamic_info,
+        reverse_point=None, stop_at_route_end=False):
+    current = np.asarray(current_position, dtype=float)[:2]
+    reference = clean_xy(reference_line)
     if (stop_at_route_end and len(reference) == 1
-            and np.linalg.norm(current-reference[0]) <= destination_tolerance):
-        return PathPlanResult(True, candidates=[PathCandidate(
-            current.reshape(1, 2), 0.0, (), 0.0, True, "GLOBAL_ROUTE_END")])
-    lines = []
-    centerline_spacing = float(planning_params["pathCenterlineSpacing"])
-    for raw_line in drivable_lines or []:
-        line = as_xy(raw_line)
-        if len(line) < 2:
-            continue
-        segment_lengths = np.linalg.norm(np.diff(line, axis=0), axis=1)
-        if (len(segment_lengths)
-                and np.max(segment_lengths) > centerline_spacing + 1e-9):
-            line = resample_polyline(line, centerline_spacing)
-        lines.append(line)
-    if not lines:
-        # The map centreline endpoint and the long-route endpoint may differ by
-        # a few millimetres.  Only suppress NO_DRIVABLE_LINE when the remaining
-        # route is already inside the declared destination tolerance; an empty
-        # drivable area anywhere else is still a planning failure.
-        if (stop_at_route_end and len(reference) >= 1
-                and np.linalg.norm(
-                    current-reference[-1]) <= destination_tolerance):
-            return PathPlanResult(True, candidates=[PathCandidate(
-                current.reshape(1, 2), 0.0, (), 0.0,
-                True, "GLOBAL_ROUTE_END")])
-        return PathPlanResult(False, "NO_DRIVABLE_LINE")
+            and np.linalg.norm(reference[0] - current) <= 1e-6):
+        return PathPlanResult(True, [PathCandidate(
+            current.reshape(1, 2), 0.0, (), 0.0,
+            True, "GLOBAL_ROUTE_END",
+        )])
     if len(reference) < 2:
-        return PathPlanResult(False, "INVALID_GLOBAL_REFERENCE_LINE")
+        return PathPlanResult(False, failureReason="INVALID_REFERENCE_LINE")
 
-    static_info = dict(vehicle_static_info or {})
-    vehicle_info = {
-        "length": float(static_info.get(
-            "length", planning_params["vehicleLength"])),
-        "width": float(static_info.get(
-            "width", planning_params["vehicleWidth"])),
-        "minTurningRadius": float(static_info.get(
-            "minTurningRadius", planning_params["minTurningRadius"])),
-    }
-    graph = build_spatial_graph(
-        lines, current, float(heading), reference, obstacles or [],
-        planning_params, vehicle_info,
-        max(0.0, float(longitudinal_uncertainty)),
-        max(0.0, float(lateral_uncertainty)),
-        None if reverse_point is None else np.asarray(reverse_point, dtype=float),
+    lines = []
+    for raw_line in drivable_lines:
+        line = clean_xy(raw_line)
+        if len(line) >= 2:
+            lines.append(line)
+    if not lines:
+        return PathPlanResult(False, failureReason="NO_DRIVABLE_LINE")
+    graph = _build_graph(
+        lines, current, float(current_heading), reference, polygons,
+        vehicle_static_info, vehicle_dynamic_info, reverse_point,
     )
-    candidates = _search_first_reachable_terminal(
-        graph, reference, planning_params, bool(stop_at_route_end))
-    if candidates:
-        return PathPlanResult(True, candidates=candidates)
 
-    # A fallback is not a curvature-relaxed lattice search. The upstream route
-    # is trusted as the only feasible line; static fences can only truncate it.
-    fallback = _reference_route_fallback(
-        current, reference, obstacles or [], vehicle_info,
-        max(0.0, float(longitudinal_uncertainty)),
-        max(0.0, float(lateral_uncertainty)),
-        bool(stop_at_route_end), reverse_point, planning_params)
-    if fallback is not None:
-        return PathPlanResult(True, candidates=[fallback])
+    immediate = []
+    immediate.extend((node_id, "REVERSE_POINT")
+                     for node_id in graph.goals
+                     if "R" in graph.nodes[node_id].roles)
+    if stop_at_route_end:
+        immediate.extend((node_id, "GLOBAL_ROUTE_END")
+                         for node_id in graph.goals
+                         if "G" in graph.nodes[node_id].roles)
+    immediate.extend((node_id, "STATIC_OBSTACLE_STOP")
+                     for node_id in graph.stops)
+    for node_id, reason in immediate:
+        if np.linalg.norm(graph.nodes[node_id].point - current) <= 1e-6:
+            return PathPlanResult(True, [PathCandidate(
+                current.reshape(1, 2), 0.0,
+                (graph.currentLine,), 0.0, True, reason,
+            )])
 
-    stationary = PathCandidate(
-        current.reshape(1, 2), 0.0, (graph["currentLine"],), 0.0,
-        True, "NO_COLLISION_FREE_PATH")
-    return PathPlanResult(False, "NO_COLLISION_FREE_PATH", [stationary])
+    for goal_id in graph.goals:
+        candidates, collision_pairs, curvature_pairs = _strict_candidates(
+            graph, goal_id, reference, polygons,
+            vehicle_static_info, vehicle_dynamic_info,
+        )
+        if candidates:
+            terminal = graph.nodes[goal_id]
+            stop = "R" in terminal.roles or (
+                stop_at_route_end and "G" in terminal.roles)
+            reason = (
+                "REVERSE_POINT" if "R" in terminal.roles
+                else "GLOBAL_ROUTE_END" if stop else None
+            )
+            candidates = [
+                PathCandidate(
+                    item.xy, item.score, item.lineSequence,
+                    item.maxCurvature, stop, reason,
+                )
+                for item in candidates
+            ]
+            return PathPlanResult(
+                True, select_optimal_paths(candidates, reference))
+
+        if _reachable(
+                graph, goal_id, polygons, vehicle_static_info,
+                vehicle_dynamic_info, collision_pairs,
+                allow_curvature=True):
+            terminal = graph.nodes[goal_id]
+            terminal_reason = (
+                "REVERSE_POINT" if "R" in terminal.roles
+                else "GLOBAL_ROUTE_END"
+                if stop_at_route_end and "G" in terminal.roles
+                else None
+            )
+            fallback = _frenet_fallback(
+                current, graph.nodes[goal_id].point, reference, polygons,
+                vehicle_static_info, vehicle_dynamic_info,
+                terminal_reason=terminal_reason,
+            )
+            return PathPlanResult(True, [fallback])
+
+    ordered_stops = sorted(
+        graph.stops,
+        key=lambda node_id: (
+            0 if (
+                graph.primaryLine is not None
+                and graph.primaryLine in graph.nodes[node_id].lineS
+            ) else 1,
+            graph.nodes[node_id].lateral,
+            graph.nodes[node_id].progress,
+        ),
+    )
+    for stop_id in ordered_stops:
+        candidates, _, _ = _strict_candidates(
+            graph, stop_id, reference, polygons,
+            vehicle_static_info, vehicle_dynamic_info,
+        )
+        if candidates:
+            candidates = [
+                PathCandidate(
+                    item.xy, item.score, item.lineSequence,
+                    item.maxCurvature, True, "STATIC_OBSTACLE_STOP",
+                )
+                for item in candidates
+            ]
+            return PathPlanResult(
+                True, select_optimal_paths(candidates, reference))
+    return PathPlanResult(False, failureReason="NO_SPATIAL_PATH")
 
 
-def plan_spatial_paths_batch(
-    jobs: Sequence[AGVPathPlanningJob],
-    params=None,
-) -> Dict[str, PathPlanResult]:
-    """逐车循环计算，Python阶段不使用线程池。"""
-    if not jobs:
-        return {}
-    planning_params = dict(DEFAULT_PLANNING_PARAMS)
-    if params:
-        planning_params.update(params)
+def select_optimal_paths(candidates, reference_line):
+    """???????????path?????????????????"""
+    best_by_signature = {}
+    for candidate in candidates:
+        path = clean_xy(candidate.xy)
+        lateral = float(np.mean(np.abs(
+            project_points_to_polyline(path, reference_line)["d"]
+        )))
+        length = float(np.sum(np.linalg.norm(
+            np.diff(path, axis=0), axis=1)))
+        curvature = float(candidate.maxCurvature)
+        score = length + PATH_REFERENCE_WEIGHT * lateral
+        value = PathCandidate(
+            path, score, candidate.lineSequence, curvature,
+            candidate.terminalStop, candidate.terminalReason,
+            candidate.degraded, candidate.degradationReason,
+        )
+        previous = best_by_signature.get(value.lineSequence)
+        if previous is None or value.score < previous.score:
+            best_by_signature[value.lineSequence] = value
+    ranked = sorted(
+        best_by_signature.values(),
+        key=lambda item: (item.score, len(item.lineSequence)),
+    )
+    selected = []
+    geometry_keys = set()
+    for candidate in ranked:
+        geometry_key = tuple(map(tuple, np.round(candidate.xy, 3)))
+        if geometry_key in geometry_keys:
+            continue
+        geometry_keys.add(geometry_key)
+        selected.append(candidate)
+        if len(selected) >= PATH_MAX_CANDIDATES:
+            break
+    return selected
 
-    def execute(job):
-        try:
-            lines = job.drivableLines
-            if lines is None:
-                lines = job.drivableAreaPlanner.plan(
-                    job.position, currentHeading=job.heading,
-                    currentSpeed=job.speed, reversePoint=job.reversePoint)
-            result = plan_spatial_path(
-                lines, job.position, job.heading, job.globalReferenceLine,
-                job.obstacles, job.vehicleStaticInfo,
-                job.longitudinalUncertainty, job.lateralUncertainty,
-                job.reversePoint, job.stopAtRouteEnd, planning_params)
-        except Exception as error:
-            result = PathPlanResult(
-                False, f"PATH_PLANNING_EXCEPTION: {error}")
-        return job.vehicleId, result
 
-    return dict(execute(job) for job in jobs)
+def _build_graph(
+        lines, current, current_heading, reference, polygons,
+        static_info, dynamic_info, reverse_point):
+    line_metrics = [_LineMetric.from_line(line) for line in lines]
+    reference_metric = _LineMetric.from_line(reference)
+    current_projections = [metric.project(current) for metric in line_metrics]
+    current_line = min(
+        range(len(lines)),
+        key=lambda index: current_projections[index]["distance"],
+    )
+    reference_start_projection = reference_metric.project(current)
+    reference_start_s = reference_start_projection["s"]
+    nodes = {
+        "S": _Node(
+            "S", current.copy(), 0.0,
+            abs(float(reference_start_projection["d"])),
+            float(reference_start_s),
+            float(reference_start_projection["d"]), {"S"},
+            {current_line: float(current_projections[current_line]["s"])},
+            {current_line: float(current_heading)},
+        )
+    }
+    node_keys = {}
+    line_nodes = {index: [] for index in range(len(lines))}
+    blocked = {}
 
-def _reference_route_fallback(
-    current, reference, obstacles, vehicle_info,
-    longitudinal_uncertainty, lateral_uncertainty,
-    stop_at_route_end, reverse_point, params,
-):
-    """Use only the trusted route; fences may shorten it to a safe stop."""
-    route = as_xy(reference)
-    if len(route) < 2:
-        return None
-    if np.linalg.norm(route[0]-current) > 1e-6:
-        route = np.vstack((current, route))
+    length = float(static_info["length"])
+    for line_index, line in enumerate(lines):
+        metric = line_metrics[line_index]
+        blocked[line_index] = line_blocked_intervals(
+            line, polygons, length, 0.0,
+            PATH_STATIC_STOP_DISTANCE,
+            PATH_OBSTACLE_REAR_CLEARANCE,
+            PATH_CURVE_SAMPLE_SPACING,
+        )
 
-    half_width = (
-        0.5*float(vehicle_info["width"])
-        + float(lateral_uncertainty)
-        + float(params["pathObstacleSafetyMargin"]))
-    intervals = blocked_path_intervals(route, obstacles, half_width)
-    route_end_s = float(arc_lengths(route)[-1])
-    terminal_s = route_end_s
-    terminal_stop = bool(stop_at_route_end)
-    terminal_reason = "GLOBAL_ROUTE_END" if terminal_stop else None
-    reverse_xy = None
+        total = metric.total
+        sample_s = np.arange(
+            PATH_GRAPH_START_OFFSET, total, PATH_NODE_SPACING)
+        specifications = [
+            (float(value), {"P"}, "P")
+            for value in sample_s
+            if not interval_contains(blocked[line_index], value)
+        ]
+        for obstacle_index, interval in enumerate(blocked[line_index]):
+            specifications.append((
+                float(interval.startS), {"T"}, f"T{obstacle_index}"))
+
+        if not interval_contains(blocked[line_index], total):
+            specifications.append((total, {"G"}, "G"))
+
+        values = [item[0] for item in specifications]
+        points, headings = metric.values_at(values)
+        reference_projections = reference_metric.project_many(points)
+        for item_index, (value, roles, suffix) in enumerate(specifications):
+            _add_node(
+                nodes, node_keys, line_nodes, line_index, value,
+                points[item_index], headings[item_index],
+                float(reference_projections["s"][item_index]),
+                float(reference_projections["d"][item_index]),
+                float(reference_projections["s"][item_index]
+                      - reference_start_s),
+                abs(float(reference_projections["d"][item_index])),
+                line_metrics, roles, suffix=suffix,
+            )
+
+    reverse_id = None
     if reverse_point is not None:
-        candidate = np.asarray(reverse_point, dtype=float).reshape(-1)[:2]
-        if candidate.shape == (2,) and np.all(np.isfinite(candidate)):
-            projection = project_to_polyline(candidate, route)
-            if projection["distance"] <= float(params["reversePointLocateTolerance"]):
-                terminal_s = float(projection["s"])
-                terminal_stop = True
-                terminal_reason = "REVERSE_POINT"
-                reverse_xy = candidate
-    if intervals:
-        stop_clearance = (
-            0.5*float(vehicle_info["length"])
-            + float(longitudinal_uncertainty)
-            + float(params["pathStopClearance"]))
-        obstacle_stop_s = max(
-            0.0, float(intervals[0].startS)-stop_clearance)
-        if obstacle_stop_s < terminal_s-1e-9:
-            terminal_s = obstacle_stop_s
-            terminal_stop = True
-            terminal_reason = "STATIC_OBSTACLE_STOP"
-            reverse_xy = None
-    route = truncate_polyline(route, terminal_s)
-    if (terminal_reason == "REVERSE_POINT" and reverse_xy is not None
-            and len(route)):
-        route[-1] = reverse_xy
+        reverse = np.asarray(reverse_point, dtype=float)[:2]
+        ranked = []
+        for line_index, metric in enumerate(line_metrics):
+            projection = metric.project(reverse)
+            ranked.append((projection["distance"], line_index, projection))
+        _, line_index, projection = min(ranked)
+        if not interval_contains(blocked[line_index], projection["s"]):
+            reference_projection = reference_metric.project(reverse)
+            reverse_id = _add_node(
+                nodes, node_keys, line_nodes, line_index,
+                projection["s"], reverse,
+                line_metrics[line_index].values_at(
+                    [projection["s"]])[1][0],
+                float(reference_projection["s"]),
+                float(reference_projection["d"]),
+                float(reference_projection["s"] - reference_start_s),
+                abs(float(reference_projection["d"])),
+                line_metrics, {"R"}, suffix="R",
+            )
 
-    if len(route) == 0:
-        route = current.reshape(1, 2)
-    maximum_curvature = float(np.max(path_curvatures(
-        route, float(params["pathCurvatureWindow"])))) if len(route) > 1 else 0.0
-    return PathCandidate(
-        xy=route[:, :2].copy(), score=0.0, lineSequence=("ROUTE",),
-        maxCurvature=maximum_curvature,
-        terminalStop=terminal_stop, terminalReason=terminal_reason,
-        degraded=True, degradationReason="REFERENCE_ROUTE_FALLBACK")
+    for line_index in line_nodes:
+        unique = sorted(
+            set(line_nodes[line_index]),
+            key=lambda node_id: nodes[node_id].lineS[line_index],
+        )
+        line_nodes[line_index] = unique
 
+    goals, primary_line = _ordered_goals(
+        nodes, line_metrics, current, current_line, reverse_id)
+    stops = [
+        node.id for node in nodes.values() if "T" in node.roles
+    ]
+    edges = {}
+    adjacency = {node_id: [] for node_id in nodes}
+    edge_keys = set()
 
-def _search_first_reachable_terminal(graph, reference, params,
-                                     stop_at_route_end):
-    """Search only curvature-feasible graph edges; fallback is handled outside."""
-    states, parent = _dynamic_programming(graph, max_signatures=32)
-    for terminal in graph["terminals"]:
-        normal = _first_terminal_candidates(
-            graph, states, parent, reference, params, stop_at_route_end,
-            terminals=(terminal,))
-        if normal:
-            return normal
-    return []
-
-def _first_terminal_candidates(graph, states, parent, reference, params,
-                               stop_at_route_end, terminals=None):
-    maximum = max(1, int(params["pathMaxCandidates"]))
-    curvature_window = float(params["pathCurvatureWindow"])
-    terminal_sequence = graph["terminals"] if terminals is None else terminals
-    for terminal in terminal_sequence:
-        if (terminal["terminalStop"] and np.linalg.norm(
-                terminal["point"]-graph["nodes"]["S"]["point"]) <= 1e-6):
-            return [PathCandidate(
-                terminal["point"].reshape(1, 2), 0.0,
-                (graph["currentLine"],), 0.0, True,
-                terminal["terminalReason"])]
-        entries = states.get(terminal["id"], {})
-        if not entries:
+    # 起点先接入当前所在可行域线。这样正常直行沿零换线代价向前传播，
+    # 不会为了抵达第一个P点而枚举全部跨线Hermite边。
+    current_start_s = current_projections[current_line]["s"]
+    for target_id in line_nodes[current_line]:
+        target = nodes[target_id]
+        target_s = target.lineS[current_line]
+        if target_s <= current_start_s + 1e-6:
             continue
-        reconstructed = []
-        for signature, cost in sorted(entries.items(), key=lambda item: item[1]):
-            edges = _reconstruct(terminal["id"], signature, parent)
-            path = _join_edges(graph["nodes"]["S"]["point"], edges)
-            if len(path) < 2:
+        if target.progress > PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE:
+            break
+        if interval_crossed(
+                blocked[current_line], current_start_s, target_s):
+            continue
+        projected_start = current_projections[current_line]["point"]
+        heading_error = abs(math.atan2(
+            math.sin(current_heading - line_metrics[current_line].values_at(
+                [current_start_s])[1][0]),
+            math.cos(current_heading - line_metrics[current_line].values_at(
+                [current_start_s])[1][0]),
+        ))
+        if (np.linalg.norm(projected_start - current) <= 1e-6
+                and heading_error <= math.radians(1.0)):
+            geometry = line_metrics[current_line].slice(
+                current_start_s, target_s)
+        else:
+            geometry = hermite_connector(
+                current, current_heading,
+                target.point, target.headings[current_line],
+                PATH_CURVE_SAMPLE_SPACING,
+            )
+        _add_edge(
+            edges, adjacency, edge_keys, "S", target_id,
+            current_line, current_line, "SAME", geometry, nodes,
+        )
+
+    for line_index, group in line_nodes.items():
+        for source_id, target_id in zip(group[:-1], group[1:]):
+            source, target = nodes[source_id], nodes[target_id]
+            if source.roles.intersection({"G", "T", "R"}):
                 continue
-            curvatures = path_curvatures(path, curvature_window)
-            maximum_curvature = (
-                float(np.max(curvatures)) if len(curvatures) else 0.0)
-            mean_lateral = float(np.mean(np.abs(
-                project_points_to_polyline(path, reference)["d"])))
-            lane_changes = max(0, len(signature)-1)
-            score = (
-                mean_lateral
-                + float(params["pathLaneChangePenalty"])*lane_changes
-                + float(params["pathCurvatureWeight"])*maximum_curvature)
-            reconstructed.append((
-                True, mean_lateral, score, signature, path,
-                maximum_curvature))
-            if len(reconstructed) >= maximum:
+            source_s = source.lineS[line_index]
+            target_s = target.lineS[line_index]
+            if interval_crossed(blocked[line_index], source_s, target_s):
+                continue
+            _add_edge(
+                edges, adjacency, edge_keys, source_id, target_id,
+                line_index, line_index, "SAME", None, nodes,
+            )
+
+    sources = ["S"] + [
+        node.id for node in nodes.values()
+        if "P" in node.roles and node.id != "S"
+    ]
+    source_points = np.asarray([nodes[node_id].point for node_id in sources])
+    lateral_to_line = {}
+    for target_line, metric in enumerate(line_metrics):
+        distances = metric.project_many(source_points)["distance"]
+        for source_id, distance in zip(sources, distances):
+            lateral_to_line[(source_id, target_line)] = float(distance)
+    for source_id in sources:
+        source = nodes[source_id]
+        source_lines = set(source.lineS)
+        for target_line, group in line_nodes.items():
+            if target_line in source_lines:
+                continue
+            lateral = lateral_to_line[(source_id, target_line)]
+            if lateral > PATH_MAX_LATERAL_CONNECTION_DISTANCE:
+                continue
+            for target_id in group:
+                target = nodes[target_id]
+                delta = target.progress - source.progress
+                if delta <= 1e-6:
+                    continue
+                if delta < lateral * PATH_LANE_CHANGE_LONGITUDINAL_RATIO:
+                    continue
+                if delta > PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE:
+                    continue
+                source_line = (
+                    min(source_lines) if source_lines else None
+                )
+                _add_edge(
+                    edges, adjacency, edge_keys, source_id, target_id,
+                    source_line, target_line, "CROSS", None, nodes,
+                )
+
+    return _Graph(
+        lines, line_metrics, reference, nodes, edges, adjacency, goals, stops,
+        primary_line, current_line)
+
+
+def _add_node(
+        nodes, node_keys, line_nodes, line_index, line_s,
+        point, heading, reference_s, reference_d, progress, lateral,
+        line_metrics,
+        roles, suffix="P"):
+    key = (
+        round(float(point[0]), 6),
+        round(float(point[1]), 6),
+        round(float(reference_s), 3),
+    )
+    node_id = None
+    for candidate_id in node_keys.get(key, ()):
+        candidate = nodes[candidate_id]
+        if any(_continuous_shared_point(
+                line_metrics[line_index], line_s,
+                line_metrics[other_line], other_s)
+                for other_line, other_s in candidate.lineS.items()):
+            node_id = candidate_id
+            break
+    if node_id is None:
+        node_id = f"N{len(nodes)}_{suffix}"
+        node_keys.setdefault(key, []).append(node_id)
+        nodes[node_id] = _Node(
+            node_id,
+            np.asarray(point, dtype=float)[:2],
+            float(progress), float(lateral), float(reference_s),
+            float(reference_d),
+        )
+    node = nodes[node_id]
+    node.roles.update(roles)
+    node.lineS[line_index] = float(line_s)
+    node.headings[line_index] = float(heading)
+    line_nodes[line_index].append(node_id)
+    return node_id
+
+
+def _continuous_shared_point(first, first_s, second, second_s):
+    """仅合并连续重合区段；孤立几何交叉点保持为两个节点。"""
+    first_heading = first.values_at([first_s])[1][0]
+    second_heading = second.values_at([second_s])[1][0]
+    if math.cos(first_heading - second_heading) < 1.0 - 1e-6:
+        return False
+    first_total = first.total
+    second_total = second.total
+    for offset in (-0.5, 0.5):
+        first_test = float(first_s) + offset
+        second_test = float(second_s) + offset
+        if (0.0 <= first_test <= first_total
+                and 0.0 <= second_test <= second_total
+                and np.linalg.norm(
+                    first.values_at([first_test])[0][0]
+                    - second.values_at([second_test])[0][0]
+                ) <= 1e-5):
+            return True
+    return False
+
+
+def _ordered_goals(nodes, line_metrics, current, current_line, reverse_id):
+    if reverse_id is not None:
+        line_index = min(nodes[reverse_id].lineS)
+        return [reverse_id], line_index
+    goals = [
+        node for node in nodes.values() if "G" in node.roles
+    ]
+    if not goals:
+        return [], None
+    primary = min(goals, key=lambda item: (
+        0 if item.lateral < PATH_G0_LATERAL_TOLERANCE else 1,
+        item.lateral, -item.progress, item.id,
+    ))
+    primary_line = min(primary.lineS)
+
+    current_on_primary = (
+        line_metrics[primary_line].project(current)["distance"] <= 1e-6)
+    current_side = 0.0
+    if not current_on_primary and current_line != primary_line:
+        current_projection = line_metrics[primary_line].project(
+            line_metrics[current_line].points[-1])
+        current_side = math.copysign(
+            1.0, current_projection["d"]
+        ) if abs(current_projection["d"]) > 1e-6 else 0.0
+
+    def order(node):
+        if node.id == primary.id:
+            return (-1, 0.0, node.id)
+        signed = line_metrics[primary_line].project(node.point)["d"]
+        same_side = (
+            current_side == 0.0
+            or abs(signed) <= 1e-6
+            or math.copysign(1.0, signed) == current_side
+        )
+        return (0 if same_side else 1, abs(signed), node.id)
+
+    ordered = sorted(goals, key=order)
+    return [item.id for item in ordered], primary_line
+
+
+def _add_edge(
+        edges, adjacency, edge_keys, source_id, target_id,
+        source_line, target_line, kind, geometry, nodes):
+    key = (source_id, target_id, source_line, target_line)
+    if key in edge_keys:
+        return
+    edge_keys.add(key)
+    edge_id = len(edges)
+    source, target = nodes[source_id], nodes[target_id]
+    if geometry is not None:
+        cost = float(np.sum(np.linalg.norm(
+            np.diff(geometry, axis=0), axis=1)))
+    elif kind == "SAME":
+        cost = abs(
+            target.lineS[target_line] - source.lineS[target_line])
+    else:
+        cost = math.hypot(
+            target.referenceS - source.referenceS,
+            target.referenceLateral - source.referenceLateral,
+        )
+    cost += PATH_REFERENCE_WEIGHT * 0.5 * (
+        source.lateral + target.lateral)
+    edges[edge_id] = _Edge(
+        edge_id, source_id, target_id, source_line, target_line,
+        kind, geometry, "UNKNOWN", 0.0, cost,
+    )
+    adjacency[source_id].append(edge_id)
+
+
+def _strict_candidates(
+        graph, target_id, reference, polygons, static_info, dynamic_info):
+    collision_pairs = set()
+    curvature_pairs = set()
+    accepted = {}
+    for _ in range(PATH_MAX_GRAPH_ITERATIONS):
+        paths = _search(
+            graph, target_id, collision_pairs, curvature_pairs,
+            allow_curvature=False)
+        if not paths:
+            return [], collision_pairs, curvature_pairs
+        valid = []
+        changed = False
+        for edge_ids, signature in paths:
+            edge_invalid = False
+            for edge_id in edge_ids:
+                edge = graph.edges[edge_id]
+                previous_state = edge.state
+                _validate_edge(
+                    graph, edge, polygons, static_info, dynamic_info)
+                if edge.state == "COLLISION_INVALID" or (
+                        edge.state == "CURVATURE_INVALID"):
+                    edge_invalid = True
+                    if previous_state == "UNKNOWN":
+                        changed = True
+                    break
+            if edge_invalid:
+                continue
+            path = _join_edges(graph, edge_ids)
+            collision = path_vehicle_intersects(
+                path, polygons,
+                static_info["length"], static_info["width"],
+                dynamic_info.get("longitudinalUncertainty", 0.0),
+                dynamic_info.get("lateralUncertainty", 0.0),
+                PATH_LATERAL_SAFETY_MARGIN,
+                PATH_COLLISION_SAMPLE_SPACING,
+            )
+            if collision:
+                pair = _invalid_pair(
+                    graph, edge_ids, polygons, static_info, dynamic_info,
+                    collision=True)
+                if pair is not None and pair not in collision_pairs:
+                    collision_pairs.add(pair)
+                    changed = True
+                continue
+            maximum = float(np.max(path_curvatures(
+                path, PATH_CURVATURE_WINDOW))) if len(path) > 2 else 0.0
+            limit = (
+                PATH_CURVATURE_TOLERANCE
+                / max(float(static_info["minTurningRadius"]), 1e-6)
+            )
+            if maximum > limit + 1e-9:
+                pair = _invalid_pair(
+                    graph, edge_ids, polygons, static_info, dynamic_info,
+                    collision=False)
+                if pair is not None and pair not in curvature_pairs:
+                    curvature_pairs.add(pair)
+                    changed = True
+                continue
+            sampled = resample_polyline(path, PATH_OUTPUT_POINT_SPACING)
+            scored_curvature = float(np.max(path_curvatures(
+                sampled, PATH_CURVATURE_WINDOW
+            ))) if len(sampled) > 2 else 0.0
+            valid.append(PathCandidate(
+                sampled, 0.0, signature, scored_curvature,
+            ))
+        for candidate in valid:
+            accepted.setdefault(candidate.lineSequence, candidate)
+        if len(accepted) >= PATH_MAX_CANDIDATES:
+            return list(accepted.values()), collision_pairs, curvature_pairs
+        if valid and not changed:
+            return list(accepted.values()), collision_pairs, curvature_pairs
+        if not changed:
+            return list(accepted.values()), collision_pairs, curvature_pairs
+    return list(accepted.values()), collision_pairs, curvature_pairs
+
+
+def _search(
+        graph, target_id, collision_pairs, curvature_pairs,
+        allow_curvature):
+    queue = [(
+        0.0, 0.0, 0, "S", None,
+        (graph.currentLine,), tuple(),
+    )]
+    serial = 1
+    best = {}
+    results = {}
+    result_limit = PATH_MAX_CANDIDATES
+    signatures_per_node = {}
+    pair_sensitive = bool(collision_pairs or curvature_pairs)
+    while queue:
+        cost, _, _, node_id, previous_edge, signature, edge_ids = heapq.heappop(queue)
+        state_key = (
+            node_id,
+            previous_edge if pair_sensitive else None,
+            signature,
+        )
+        if cost > best.get(state_key, float("inf")) + 1e-9:
+            continue
+        if node_id == target_id:
+            results.setdefault(signature, (cost, edge_ids))
+            if len(results) >= result_limit:
                 break
-        if not reconstructed:
             continue
-        terminal_stop = bool(terminal["terminalStop"] or (
-            stop_at_route_end and terminal["kind"] == "G"))
-        terminal_reason = terminal["terminalReason"]
-        if terminal_reason is None and stop_at_route_end and terminal["kind"] == "G":
-            terminal_reason = "GLOBAL_ROUTE_END"
-        chosen = sorted(
-            reconstructed, key=lambda item: (item[2], item[1]))[:maximum]
-        return [_candidate(item, terminal_stop, terminal_reason)
-                for item in chosen]
-    return []
+        for edge_id in graph.adjacency.get(node_id, ()):
+            edge = graph.edges[edge_id]
+            if edge.state == "COLLISION_INVALID":
+                continue
+            if (not allow_curvature
+                    and edge.state == "CURVATURE_INVALID"):
+                continue
+            pair = (previous_edge, edge_id)
+            if pair in collision_pairs:
+                continue
+            if not allow_curvature and pair in curvature_pairs:
+                continue
+            new_signature = signature
+            if not new_signature or new_signature[-1] != edge.targetLine:
+                new_signature = signature + (edge.targetLine,)
+            known = signatures_per_node.setdefault(edge.target, set())
+            if (new_signature not in known
+                    and len(known) >= PATH_MAX_SIGNATURES_PER_NODE):
+                continue
+            known.add(new_signature)
+            new_cost = cost + edge.cost
+            new_key = (
+                edge.target,
+                edge_id if pair_sensitive else None,
+                new_signature,
+            )
+            if new_cost >= best.get(new_key, float("inf")) - 1e-9:
+                continue
+            best[new_key] = new_cost
+            heapq.heappush(queue, (
+                new_cost, -graph.nodes[edge.target].progress,
+                serial, edge.target, edge_id,
+                new_signature, edge_ids + (edge_id,),
+            ))
+            serial += 1
+    return [
+        (edge_ids, signature)
+        for signature, (_, edge_ids) in sorted(
+            results.items(), key=lambda item: item[1][0])
+    ]
 
-def _candidate(item, terminal_stop, terminal_reason):
-    _, _, score, signature, path, maximum_curvature = item
+
+def _reachable(
+        graph, target_id, polygons, static_info, dynamic_info,
+        collision_pairs, allow_curvature):
+    stack = [("S", None)]
+    visited = set()
+    while stack:
+        node_id, previous_edge = stack.pop()
+        if node_id == target_id:
+            return True
+        state = (node_id, previous_edge)
+        if state in visited:
+            continue
+        visited.add(state)
+        for edge_id in graph.adjacency.get(node_id, ()):
+            if (previous_edge, edge_id) in collision_pairs:
+                continue
+            edge = graph.edges[edge_id]
+            _validate_edge(
+                graph, edge, polygons, static_info, dynamic_info)
+            if edge.state == "COLLISION_INVALID":
+                continue
+            if not allow_curvature and edge.state == "CURVATURE_INVALID":
+                continue
+            stack.append((edge.target, edge_id))
+    return False
+
+
+def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
+    if edge.state != "UNKNOWN":
+        return
+    if edge.kind == "SAME" and not polygons:
+        edge.state = "VALID"
+        return
+    _materialize_edge(graph, edge, dynamic_info)
+    if path_vehicle_intersects(
+            edge.geometry, polygons,
+            static_info["length"], static_info["width"],
+            dynamic_info.get("longitudinalUncertainty", 0.0),
+            dynamic_info.get("lateralUncertainty", 0.0),
+            PATH_LATERAL_SAFETY_MARGIN,
+            PATH_COLLISION_SAMPLE_SPACING):
+        edge.state = "COLLISION_INVALID"
+        return
+    if edge.kind == "SAME":
+        edge.state = "VALID"
+        return
+    maximum = float(np.max(path_curvatures(
+        edge.geometry, PATH_CURVATURE_WINDOW
+    ))) if len(edge.geometry) > 2 else 0.0
+    edge.maxCurvature = maximum
+    limit = (
+        PATH_CURVATURE_TOLERANCE
+        / max(float(static_info["minTurningRadius"]), 1e-6)
+    )
+    edge.state = (
+        "VALID" if maximum <= limit + 1e-9
+        else "CURVATURE_INVALID"
+    )
+
+
+def _materialize_edge(graph, edge, dynamic_info=None):
+    if edge.geometry is not None:
+        return edge.geometry
+    source, target = graph.nodes[edge.source], graph.nodes[edge.target]
+    if edge.kind == "SAME":
+        edge.geometry = graph.lineMetrics[edge.targetLine].slice(
+            source.lineS[edge.targetLine],
+            target.lineS[edge.targetLine],
+        )
+    else:
+        source_heading = (
+            float((dynamic_info or {}).get("heading", 0.0))
+            if edge.source == "S"
+            else source.headings[edge.sourceLine]
+        )
+        edge.geometry = frenet_hermite_connector(
+            source.point, source_heading,
+            source.referenceS,
+            target.point, target.headings[edge.targetLine],
+            target.referenceS,
+            graph.referenceLine,
+            PATH_CURVE_SAMPLE_SPACING,
+        )
+    return edge.geometry
+
+
+def _join_edges(graph, edge_ids):
+    path = graph.nodes["S"].point.reshape(1, 2)
+    for edge_id in edge_ids:
+        edge = graph.edges[edge_id]
+        path = append_polyline(path, _materialize_edge(graph, edge))
+    return clean_xy(path)
+
+
+def _invalid_pair(
+        graph, edge_ids, polygons, static_info, dynamic_info, collision):
+    for previous, current in zip(edge_ids[:-1], edge_ids[1:]):
+        joined = append_polyline(
+            graph.edges[previous].geometry,
+            graph.edges[current].geometry,
+        )
+        if collision:
+            invalid = path_vehicle_intersects(
+                joined, polygons,
+                static_info["length"], static_info["width"],
+                dynamic_info.get("longitudinalUncertainty", 0.0),
+                dynamic_info.get("lateralUncertainty", 0.0),
+                PATH_LATERAL_SAFETY_MARGIN,
+                PATH_COLLISION_SAMPLE_SPACING,
+            )
+        else:
+            maximum = float(np.max(path_curvatures(
+                joined, PATH_CURVATURE_WINDOW)))
+            invalid = maximum > (
+                PATH_CURVATURE_TOLERANCE
+                / max(float(static_info["minTurningRadius"]), 1e-6)
+            ) + 1e-9
+        if invalid:
+            return previous, current
+    return None
+
+
+def _frenet_fallback(
+        current, target, reference, polygons, static_info, dynamic_info,
+        terminal_reason):
+    path = frenet_connector(
+        current, target, reference, PATH_OUTPUT_POINT_SPACING)
+    stop_s = first_polygon_stop_s(
+        path, polygons,
+        static_info["length"],
+        0.0,
+        PATH_STATIC_STOP_DISTANCE,
+        PATH_CURVE_SAMPLE_SPACING,
+    )
+    stop = terminal_reason == "REVERSE_POINT"
+    reason = terminal_reason
+    if stop_s is not None:
+        path = truncate_polyline(path, stop_s)
+        stop = True
+        reason = "STATIC_OBSTACLE_STOP"
+    maximum = float(np.max(path_curvatures(
+        path, PATH_CURVATURE_WINDOW))) if len(path) > 2 else 0.0
     return PathCandidate(
-        xy=np.asarray(path, dtype=float)[:, :2].copy(),
-        score=float(score), lineSequence=tuple(signature),
-        maxCurvature=float(maximum_curvature),
-        terminalStop=terminal_stop, terminalReason=terminal_reason)
-
-
-def _dynamic_programming(graph, max_signatures=32):
-    nodes, adjacency = graph["nodes"], graph["adjacency"]
-    start_signature = (int(graph["currentLine"]),)
-    states = {"S": {start_signature: 0.0}}
-    parent = {}
-    order = sorted(nodes.values(), key=lambda item: (item["progress"], item["id"]))
-    for node in order:
-        entries = states.get(node["id"])
-        if not entries:
-            continue
-        if len(entries) > max_signatures:
-            entries = dict(sorted(
-                entries.items(), key=lambda item: item[1])[:max_signatures])
-            states[node["id"]] = entries
-        for signature, cost in list(entries.items()):
-            for edge in adjacency.get(node["id"], []):
-                if not edge["curvatureOK"]:
-                    continue
-                target = nodes[edge["to"]]
-                if target["progress"] <= node["progress"] + 1e-6:
-                    continue
-                new_signature = signature
-                if signature[-1] != edge["targetLine"]:
-                    new_signature = signature + (int(edge["targetLine"]),)
-                new_cost = cost + float(edge["cost"])
-                destination = states.setdefault(edge["to"], {})
-                if new_cost < destination.get(new_signature, float("inf"))-1e-9:
-                    destination[new_signature] = new_cost
-                    parent[(edge["to"], new_signature)] = (
-                        node["id"], signature, edge)
-    return states, parent
-
-def _reconstruct(terminal_id, state_key, parent):
-    edges = []
-    cursor = (terminal_id, state_key)
-    while cursor in parent:
-        previous_id, previous_key, edge = parent[cursor]
-        edges.append(edge)
-        cursor = (previous_id, previous_key)
-    edges.reverse()
-    return edges
-
-
-def _join_edges(start, edges):
-    points = [np.asarray(start, dtype=float)[:2]]
-    # 图节点投影可能生成亚毫米级伪边；保留这种边会让它不稳定的航向
-    # 污染5m曲率窗口，并在当前位置制造虚假的极低限速。
-    minimum_segment_length = 1e-3
-    for edge in edges:
-        for point in as_xy(edge["curve"])[1:]:
-            if np.linalg.norm(point - points[-1]) > minimum_segment_length:
-                points.append(point)
-    return np.asarray(points, dtype=float)
+        resample_polyline(path, PATH_OUTPUT_POINT_SPACING),
+        0.0, ("FRENET",), maximum, stop, reason,
+        True, "FRENET_FALLBACK",
+    )
