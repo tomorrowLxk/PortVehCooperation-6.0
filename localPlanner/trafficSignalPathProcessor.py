@@ -12,6 +12,7 @@ from localPlanner.pathGeometry import (
     project_points_to_polyline,
     truncate_polyline,
 )
+from localPlanner.pathSpeedPlanner import build_speed_limit_path
 from localPlanner.spatialPathPlanner import PathCandidate
 from parameters import (
     TRAFFIC_SIGNAL_HEADING_AFTER_WINDOW,
@@ -27,6 +28,32 @@ LEFT_TURN = "leftTurn"
 U_TURN = "UTurn"
 STRAIGHT = "straight"
 RED = "RED"
+
+
+def apply_traffic_signals_to_base_paths(
+        base_paths, planning_max_speed, centerline_dict, connector_dict,
+        lane_signals, eligible_lane_ids=None):
+    """对一辆车的basePath集合应用本帧信控，不修改输入集合。"""
+    output = []
+    for base_path in base_paths:
+        base = np.asarray(base_path, dtype=float)
+        candidate = PathCandidate(clean_xy(base), 0.0, (), 0.0)
+        processed = apply_traffic_signal(
+            candidate,
+            centerline_dict,
+            connector_dict,
+            lane_signals,
+            eligible_lane_ids,
+        )
+        if processed.terminalReason == "RED_SIGNAL":
+            output.append(build_speed_limit_path(
+                processed.xy,
+                planning_max_speed,
+                True,
+            ))
+        else:
+            output.append(base.copy())
+    return output
 
 
 def apply_traffic_signal(

@@ -10,8 +10,8 @@ def build_request_temporary_info(requests, vehicle_static_info_cache):
 
     for request in requests:
         vehicle_id = str(request.get('deviceId'))
-        vehicle_type = str(request.get('deviceType'))
-        is_agv = vehicle_type.upper() == 'AGV'
+        vehicle_type = request.get('deviceType')
+        is_agv = vehicle_type == 'AGV'
         defaults = DEFAULT_AGV_STATIC_INFO if is_agv else DEFAULT_NON_AGV_STATIC_INFO
         static_info = vehicle_static_info_cache.get(vehicle_id, {})
 

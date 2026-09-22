@@ -35,6 +35,7 @@ VEHICLE_LANE_LOCATE_TOPOLOGY_DEPTH = 2  # 后续帧从上一匹配车道向左�
 FUTURE_PATH_LENGTH = 80.0  # 本帧用于分组、HV预测和空间规划的前向参考线长度，单位m
 FUTURE_PATH_POINT_SPACING = 1.0  # futurePath重采样点间距，单位m
 HV_PREDICTION_HORIZON = 3.0  # HV按当前速度匀速预测的时间范围，单位s
+AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 2.0  # AGV接近历史第二个waypoint并触发basePath重规划的距离，单位m
 
 PATH_NODE_SPACING = 8.0  # 每条可行域线生成普通P节点的纵向间距，单位m
 PATH_GRAPH_START_OFFSET = 10.0  # 从车辆当前位置向前首次布置P节点的距离，单位m

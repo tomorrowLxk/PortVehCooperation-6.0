@@ -16,6 +16,10 @@ from parameters import (
     VEHICLE_OBSTACLE_MAX_FRAMES,
     VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD,
     VEHICLE_STOP_SPEED_THRESHOLD,
+    AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE,
+    PATH_COLLISION_SAMPLE_SPACING,
+    PATH_G0_LATERAL_TOLERANCE,
+    PATH_LATERAL_SAFETY_MARGIN,
 )
 
 from localPlanner.cooperationPlanner import (
@@ -32,6 +36,12 @@ from localPlanner.spatialPlanningStage import (
     mark_response_failure,
     plan_agv_spatial,
     plan_hv_spatial,
+)
+from localPlanner.pathCollision import path_vehicle_intersects
+from localPlanner.pathGeometry import (
+    polyline_length,
+    project_to_polyline,
+    slice_polyline,
 )
 
 from tools.obstacle_processing import generateStaticObstacles
@@ -95,7 +105,7 @@ class PlanningEngine:
                        dynamicInfo, staticInfo, centerlineDict, connectorDict, mapVersion):
         """根据本帧长路径结果，原地准备或更新单车规划上下文。"""
         vehicleId = str(request.get('deviceId'))
-        vehicleType = str(request.get('deviceType')).upper()
+        vehicleType = request.get('deviceType')
         isAgv = vehicleType == 'AGV'
         commandId = request.get('commandId')
         allowReverse = bool(request.get('allowReverse')) if isAgv else False
@@ -258,15 +268,61 @@ class PlanningEngine:
             'allowReverse': allowReverse,
         }
 
-    def updateVehicleObstacleCaches(
-            self, requests, responses, longRouteSuccess,
-            plannedPathResults):
-        '''在整帧规划结束后统一判断、维持或恢复全部车辆的死车状态。'''
+    def shouldReplanAgvBasePath(
+            self, vehicleId, dynamicInfo, obstaclePolygons):
+        """判断AGV的完整basePath缓存是否需要重新进行空间规划。"""
+        basePath = self.vehiclePathCaches.get(vehicleId)
+        if basePath is None or len(basePath) < 2:
+            return True
+
+        planner = self.drivableAreaPlannerCaches.get(vehicleId)
+        referenceLine = (
+            planner.referLine
+            if planner is not None
+            else self.vehicleRouteCaches.get(vehicleId)
+        )
+        if referenceLine is None or len(referenceLine) < 2:
+            return True
+        if (project_to_polyline(basePath[-1, :2], referenceLine)['distance']
+                > PATH_G0_LATERAL_TOLERANCE):
+            return True
+
+        position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
+        basePathProgress = project_to_polyline(position, basePath)['s']
+        remainingBasePath = slice_polyline(
+            basePath,
+            basePathProgress,
+            polyline_length(basePath),
+        )
+        staticInfo = self.vehicleStaticInfoCaches[vehicleId]
+        if path_vehicle_intersects(
+                remainingBasePath,
+                obstaclePolygons,
+                staticInfo['length'],
+                staticInfo['width'],
+                dynamicInfo.get('longitudinalUncertainty', 0.0),
+                dynamicInfo.get('lateralUncertainty', 0.0),
+                PATH_LATERAL_SAFETY_MARGIN,
+                PATH_COLLISION_SAMPLE_SPACING):
+            return True
+
+        waypoints = self.vehicleWaypointCaches.get(vehicleId)
+        if waypoints is None or len(waypoints) < 2:
+            return True
+        secondWaypoint = np.asarray(waypoints[1], dtype=float)[:2]
+        if (np.linalg.norm(position - secondWaypoint)
+                <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE):
+            return True
+
+        return False
+
+    def updateVehicleObstacleCaches(self, requests, agvCandidatePaths):
+        """在空间规划完成后，按本帧BSM维护全部车辆的死车状态。"""
         requestMap = {
             str(request.get('deviceId')): request for request in requests
         }
         responseMap = {
-            str(request.get('deviceId')): responses[index]
+            str(request.get('deviceId')): self.responses[index]
             for index, request in enumerate(requests)
         }
         updated = {}
@@ -274,13 +330,10 @@ class PlanningEngine:
         for vehicleId, dynamicInfo in self.vehicleDynamicInfoCaches.items():
             vehicleId = str(vehicleId)
             old = self.vehicleObstacleCaches.get(vehicleId, {})
-            request = requestMap.get(vehicleId)
 
-            bsmIsCurrent = (
-                    bool(dynamicInfo.get('valid', False))
-                    and int(dynamicInfo.get('_missingFrames', 0)) == 0
-            )
-            if request is None or not bsmIsCurrent:
+            # 没有本帧有效BSM时无法重新判断，缓存随车辆信息缓存暂时保留。
+            if (not dynamicInfo.get('valid', False)
+                    or int(dynamicInfo.get('_missingFrames', 0)) > 0):
                 updated[vehicleId] = {
                     'dead': bool(old.get('dead', False)),
                     'frames': min(
@@ -291,13 +344,21 @@ class PlanningEngine:
                 }
                 continue
 
-            vehicleType = str(request.get('deviceType')).upper()
-            position = np.asarray(dynamicInfo.get('position'), dtype=float)[:2]
-            planner = self.drivableAreaPlannerCaches.get(vehicleId)
+            request = requestMap.get(vehicleId)
+            response = responseMap.get(vehicleId)
+            staticInfo = self.vehicleStaticInfoCaches[vehicleId]
+            vehicleType = (
+                request.get('deviceType')
+                if request is not None
+                else staticInfo.get('vehicleType')
+            )
+            isAgv = vehicleType == 'AGV'
+            position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
             reason = None
 
-            # 1. 终点死车。
-            if vehicleType == 'AGV':
+            # 1. 每帧根据本帧BSM重新判断终点死车。
+            if isAgv:
+                planner = self.drivableAreaPlannerCaches.get(vehicleId)
                 if planner is not None and planner.lastRouteS is not None:
                     route = np.asarray(planner.referLine, dtype=float)[:, :2]
                     routeLength = float(
@@ -315,36 +376,44 @@ class PlanningEngine:
                             <= HV_DESTINATION_DISTANCE_THRESHOLD):
                         reason = '终点'
 
-            # 2-5. 失败类型统一读取response，不在死车模块中重复推断。
-            response = responseMap[vehicleId]
-            planningFailed = (
-                not response.get('success', False)
-                if vehicleType == 'AGV'
-                else not longRouteSuccess.get(vehicleId, False)
-            )
-            if reason is None and planningFailed:
-                failureReason = (
+            # 2. 有response时实时判断规划失败；无response时只继承上一帧规划失败。
+            if reason is None:
+                if response is not None and not response.get('success', False):
+                    failureReason = str(
                         response.get('message')
                         or response.get('code')
                         or '规划失败'
-                )
-                failureReason = str(failureReason)
-                reason = (
-                    failureReason
-                    if failureReason.startswith('失败：')
-                    else f'失败：{failureReason}'
-                )
+                    )
+                    reason = (
+                        failureReason
+                        if failureReason.startswith('失败：')
+                        else f'失败：{failureReason}'
+                    )
+                elif response is None:
+                    oldReason = str(old.get('reason') or '')
+                    if oldReason.startswith('失败：'):
+                        reason = oldReason
 
-            # 6. 有可执行短路径但车辆没有执行。
-            if reason is None:
-                path = plannedPathResults.get(vehicleId)
-                if (
-                        float(dynamicInfo.get('speed', 0.0))
-                        < VEHICLE_STOP_SPEED_THRESHOLD
-                        and remaining_path_length(path, position)
-                        > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
-                ):
-                    reason = '其他'
+            # 3. 前面均未命中时，仅AGV根据执行情况判断其他死车。
+            if (reason is None and isAgv
+                    and float(dynamicInfo.get('speed', 0.0))
+                    < VEHICLE_STOP_SPEED_THRESHOLD):
+                historicalPath = self.vehiclePathCaches.get(vehicleId)
+                historicalPathCanMove = (
+                    remaining_path_length(historicalPath, position)
+                    > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
+                )
+                if historicalPathCanMove:
+                    if request is None:
+                        reason = '其他'
+                    else:
+                        currentPaths = agvCandidatePaths.get(vehicleId, ())
+                        if any(
+                            remaining_path_length(path, position)
+                            > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
+                            for path in currentPaths
+                        ):
+                            reason = '其他'
 
             if reason is None:
                 updated[vehicleId] = {
@@ -411,11 +480,6 @@ class PlanningEngine:
                                                                                   self.vehicleStaticInfoCaches)
 
         # todo. 四、准备全部车辆的规划上下文
-        longRouteSuccess = {
-            str(request.get('deviceId')): bool(self.responses[index].get('success', False))
-            for index, request in enumerate(requests)
-        }
-
         for request_index, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
             self.prepareVehicle(
@@ -431,15 +495,11 @@ class PlanningEngine:
                 mapVersion=mapVersion,
             )
 
-        # todo. 五、生成所有车辆的futurePath和空间path候选。
-        # futurePath为Nx2；HV path和AGV候选path均为Nx3[x,y,vMax]。
-        # 此处显式逐request循环；单车函数不遍历车辆，并原地追加本阶段response信息。
-        """HV不是无视障碍物，而是“只截停、不绕行。"""
-
-        HV_local_path = {}  # HV唯一预测3s traj，vehicleId -> Nx3[x,y,vMax]
-        AGV_all_local_path = {}  # AGV最多5条候选，vehicleId -> List[Nx3]
-        future_path = {}  # 所有车辆前方约80m的参考path，vehicleId -> Nx2
-        spatialDrivableLines = {}  # AGV本帧局部可行域线, 目前仅用于诊断/可视化
+        # todo. 五、为必要车辆生成basePath，并更新vehiclePathCaches。
+        # AGV按request规划候选；HV按本帧全部BSM生成固定长度basePath。
+        # 本阶段不处理response、速度包络、已驶过路段裁剪和信号灯截断。
+        AGV_basePathCandidates = {}  # 仅用于调试，vehicleId -> List[Nx3]
+        spatialDrivableLines = {}  # 仅用于调试/可视化
 
         all_obstacle_polygons = build_obstacle_polygons(
             obstacle_map=obstacleMap,
@@ -448,53 +508,91 @@ class PlanningEngine:
             vehicle_static_caches=self.vehicleStaticInfoCaches,
         )
 
-        for request_index, request in enumerate(requests):
+        # 只为空间规划请求中的AGV；缓存仍有效时直接复用完整basePath。
+        for request in requests:
+            if request.get('deviceType') != 'AGV':
+                continue
             vehicleId = str(request.get('deviceId'))
-            vehicleType = str(request.get('deviceType')).upper()
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
             staticInfo = self.vehicleStaticInfoCaches[vehicleId]
-
-            # 排除掉包含本车的障碍物
             vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
+            if not self.shouldReplanAgvBasePath(
+                    vehicleId, dynamicInfo, vehi_obstacle_polygons):
+                AGV_basePathCandidates[vehicleId] = [
+                    self.vehiclePathCaches[vehicleId].copy()
+                ]
+                continue
 
-            if vehicleType == 'AGV':
-                result = plan_agv_spatial(
-                    response=self.responses[request_index],
-                    dynamic_info=dynamicInfo,
-                    static_info=staticInfo,
-                    planning_max_speed=vehiclePlanningMaxSpeeds[vehicleId],
-                    drivable_area_planner=self.drivableAreaPlannerCaches.get(vehicleId),
-                    reverse_point=self.reversePointCaches.get(vehicleId),
-                    polygons=vehi_obstacle_polygons,
-                    lane_signals=laneSignal_zy,
-                )
-            else:
-                result = plan_hv_spatial(
-                    response=self.responses[request_index],
-                    dynamic_info=dynamicInfo,
-                    static_info=staticInfo,
-                    planning_max_speed=vehiclePlanningMaxSpeeds[vehicleId],
-                    route=self.vehicleRouteCaches.get(vehicleId),
-                    polygons=vehi_obstacle_polygons,
-                    route_progress_cache=self.vehicleRouteProgressCaches.setdefault(vehicleId, {}),
-                    route_lane_ids=self.vehicleLaneIDCaches.get(vehicleId),
-                    lane_signals=laneSignal_zy,
-                    centerline_dict=CenterlineDict,
-                    connector_dict=ConnectorDict,
-                )
+            result = plan_agv_spatial(
+                dynamic_info=dynamicInfo,
+                static_info=staticInfo,
+                planning_max_speed=vehiclePlanningMaxSpeeds[vehicleId],
+                drivable_area_planner=self.drivableAreaPlannerCaches.get(vehicleId),
+                reverse_point=self.reversePointCaches.get(vehicleId),
+                polygons=vehi_obstacle_polygons,
+            )
+            AGV_basePathCandidates[vehicleId] = result.candidatePaths
+            spatialDrivableLines[vehicleId] = result.drivableLines
+            if result.candidatePaths:
+                self.vehiclePathCaches[vehicleId] = result.candidatePaths[0].copy()
+            if result.reversePointReached:
+                self.reversePointCaches.pop(vehicleId, None)
 
-            future_path[vehicleId] = result.futurePath
+        requestResponseMap = {
+            str(request.get('deviceId')): self.responses[index]
+            for index, request in enumerate(requests)
+        }
 
-            if vehicleType == 'AGV':
-                spatialDrivableLines[vehicleId] = result.drivableLines
-                if result.candidatePaths:
-                    AGV_all_local_path[vehicleId] = result.candidatePaths
-                if result.reversePointReached:
-                    self.reversePointCaches.pop(vehicleId, None)
-            elif result.candidatePaths:
-                HV_local_path[vehicleId] = result.candidatePaths[0]
+        # 本帧BSM中的全部非AGV每帧更新。长路径成功时保持横向d并沿纵向s
+        # 延伸固定空间长度；长路径失败或没有route时按当前速度预测固定时长。
+        for rawVehicleId in allVehicleStates:
+            vehicleId = str(rawVehicleId)
+            staticInfo = self.vehicleStaticInfoCaches[vehicleId]
+            if staticInfo.get('vehicleType') == 'AGV':
+                continue
+            dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
+            vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
+            response = requestResponseMap.get(vehicleId)
+            route = self.vehicleRouteCaches.get(vehicleId)
+            if response is not None and not response.get('success', False):
+                route = None
+            result = plan_hv_spatial(
+                dynamic_info=dynamicInfo,
+                static_info=staticInfo,
+                planning_max_speed=vehiclePlanningMaxSpeeds.get(
+                    vehicleId, staticInfo['maxSpeed']),
+                route=route,
+                polygons=vehi_obstacle_polygons,
+                route_progress_cache=self.vehicleRouteProgressCaches.setdefault(vehicleId, {}),
+            )
+            if result.candidatePaths:
+                self.vehiclePathCaches[vehicleId] = result.candidatePaths[0].copy()
 
-        # 六、仅根据futurePath的空间接近关系生成协同连通块，保留单车块。
+
+        # todo. 六、根据vehiclePathCaches生成全部BSM车辆的futurePath：
+        # 裁剪已驶过路段、按信号灯截断并生成速度包络。
+
+        # 以下变量是第六步尚未重写前的临时兼容视图；不反写basePath缓存。
+        AGV_all_local_path = AGV_basePathCandidates
+        HV_local_path = {
+            vehicleId: path
+            for vehicleId, path in self.vehiclePathCaches.items()
+            if (vehicleId in self.vehicleStaticInfoCaches
+                and self.vehicleStaticInfoCaches[vehicleId].get('vehicleType') != 'AGV')
+        }
+        future_path = {
+            vehicleId: np.asarray(path, dtype=float)[:, :2]
+            for vehicleId, path in self.vehiclePathCaches.items()
+            if vehicleId in self.vehicleDynamicInfoCaches
+        }
+
+        # todo. 七、根据本帧BSM、response、历史path和当前空间候选确定死车。
+        self.updateVehicleObstacleCaches(
+            requests=requests,
+            agvCandidatePaths=AGV_all_local_path,
+        )
+
+        # todo 八、仅根据futurePath的空间接近关系生成协同连通块，保留单车块。
         cooperationBlocks = group_by_future_paths(
             future_path,
             self.vehicleStaticInfoCaches,
@@ -587,9 +685,6 @@ class PlanningEngine:
                 waypointResults.update(blockWaypointResult.waypointResults)
                 plannedPathResults.update(blockWaypointResult.plannedPaths)
                 newPriorityEdges.update(priorityResult.priorityEdges)
-                for vehicleId, path in blockWaypointResult.plannedPaths.items():
-                    if vehicleId in waypointCacheVehicleIds:
-                        self.vehiclePathCaches[vehicleId] = path
                 for vehicleId, waypoints in blockWaypointResult.waypointResults.items():
                     if vehicleId in waypointCacheVehicleIds:
                         self.vehicleWaypointCaches[vehicleId] = waypoints
@@ -605,7 +700,6 @@ class PlanningEngine:
                         waypointResults[vehicleId] = stop
                         plannedPathResults[vehicleId] = stop[:2, [0, 1, 3]].copy()
                     self.vehicleWaypointCaches.pop(vehicleId, None)
-                    self.vehiclePathCaches.pop(vehicleId, None)
                 newPriorityEdges = {edge for edge in newPriorityEdges
                                     if not set(edge).intersection(cooperationBlock)}
 
@@ -626,12 +720,6 @@ class PlanningEngine:
             },
         }
 
-        self.updateVehicleObstacleCaches(
-            requests=requests,
-            responses=self.responses,
-            longRouteSuccess=longRouteSuccess,
-            plannedPathResults=plannedPathResults,
-        )
 
         # 十、直接返回与requests同下标的PathPlanningResponseVO列表，补全
         # success、失败原因和三类路径字段，不再增加finalResult包装对象。

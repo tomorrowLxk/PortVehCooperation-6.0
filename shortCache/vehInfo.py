@@ -47,8 +47,8 @@ def update_vehicle_static_cache(all_vehicle_static_info, previous_cache):
     """用本帧VehicleStaticVO更新静态缓存，缺失字段采用车型默认值。"""
     updated = {}
     for vehicle_id, static_info in (all_vehicle_static_info or {}).items():
-        vehicle_type = str(_field(static_info, "vehicleType", "AGV"))
-        defaults = (DEFAULT_AGV_STATIC_INFO if vehicle_type.upper() == "AGV"
+        vehicle_type = _field(static_info, "vehicleType", "AGV")
+        defaults = (DEFAULT_AGV_STATIC_INFO if vehicle_type == "AGV"
                     else DEFAULT_NON_AGV_STATIC_INFO)
         bounding_box = _field(static_info, "boundingBox")
         kinematics = _field(static_info, "kinematics")

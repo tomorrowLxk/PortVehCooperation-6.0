@@ -391,8 +391,12 @@ def _build_graph(
         )
 
         total = metric.total
+        line_start_s = float(current_projections[line_index]['s'])
         sample_s = np.arange(
-            PATH_GRAPH_START_OFFSET, total, PATH_NODE_SPACING)
+            line_start_s + PATH_GRAPH_START_OFFSET,
+            total,
+            PATH_NODE_SPACING,
+        )
         specifications = [
             (float(value), {"P"}, "P")
             for value in sample_s

@@ -13,18 +13,19 @@ from localPlanner.pathCollision import (
 )
 from localPlanner.pathGeometry import (
     clean_xy,
+    point_at_s,
     polyline_length,
     project_to_polyline,
     resample_polyline,
     slice_polyline,
+    tangent_at_s,
     truncate_polyline,
 )
 from localPlanner.pathSpeedPlanner import (
     build_speed_limit_path,
     stationary_path,
 )
-from localPlanner.spatialPathPlanner import PathCandidate, plan_spatial_path
-from localPlanner.trafficSignalPathProcessor import apply_traffic_signal
+from localPlanner.spatialPathPlanner import plan_spatial_path
 from parameters import (
     FUTURE_PATH_LENGTH,
     FUTURE_PATH_POINT_SPACING,
@@ -100,70 +101,39 @@ def exclude_vehi_polygons(polygons, dynamic_info):
 
 
 def plan_hv_spatial(
-        response, dynamic_info, static_info, planning_max_speed, route, polygons,
-        route_progress_cache, route_lane_ids, lane_signals,
-        centerline_dict, connector_dict):
-    """生成一辆HV的futurePath和唯一预测path。"""
+        dynamic_info, static_info, planning_max_speed, route, polygons,
+        route_progress_cache):
+    """有route时按固定空间长度预测，否则按当前速度预测固定时长。"""
     position = np.asarray(dynamic_info["position"], dtype=float)[:2]
     heading = float(dynamic_info["heading"])
     speed = max(0.0, float(dynamic_info["speed"]))
 
-    if not response.get("success", True):
-        route_xy = clean_xy(route) if route is not None else np.empty((0, 2))
-        if len(route_xy) >= 2:
-            append_response_message(
-                response, "短路径降级：启用历史长路径。")
-        else:
-            append_response_message(
-                response, "短路径降级：无历史长路径，启用匀速预测。")
-
-    future_path, future_reaches_route_end = _build_hv_future_path(
+    base_path, reaches_route_end = _build_hv_base_path(
         position, heading, speed, route, route_progress_cache)
-    local_path, terminal_stop = _build_hv_local_path(
-        future_path, speed, polygons, static_info,
-        future_reaches_route_end)
-    signal_candidate = apply_traffic_signal(
-        PathCandidate(
-            local_path, 0.0, (), 0.0, terminal_stop,
-            "ROUTE_END_OR_STATIC_OBSTACLE" if terminal_stop else None,
-        ),
-        centerline_dict,
-        connector_dict,
-        lane_signals,
-        route_lane_ids,
+    base_path, terminal_stop = _apply_hv_obstacles(
+        base_path, polygons, static_info, reaches_route_end)
+    speed_path = build_speed_limit_path(
+        base_path,
+        planning_max_speed,
+        terminal_stop,
     )
-    if speed <= 1e-9:
-        speed_path = stationary_path(position)
-    else:
-        speed_path = build_speed_limit_path(
-            signal_candidate.xy,
-            planning_max_speed,
-            signal_candidate.terminalStop,
-        )
-    return VehicleSpatialResult(True, future_path, [speed_path])
+    return VehicleSpatialResult(True, base_path, [speed_path])
 
 
 def plan_agv_spatial(
-        response, dynamic_info, static_info, planning_max_speed,
-        drivable_area_planner, reverse_point, polygons, lane_signals):
-    """生成一辆AGV的futurePath和空间path候选，并原地追加本阶段状态。"""
+        dynamic_info, static_info, planning_max_speed,
+        drivable_area_planner, reverse_point, polygons):
+    """生成一辆AGV的basePath候选，不写接口response。"""
     position = np.asarray(dynamic_info["position"], dtype=float)[:2]
     heading = float(dynamic_info["heading"])
     speed = max(0.0, float(dynamic_info["speed"]))
 
     if drivable_area_planner is None:
         reason = "NO_DRIVABLE_AREA_PLANNER"
-        mark_response_failure(
-            response, reason, "空间规划失败：无可行域规划器。")
         return VehicleSpatialResult(
             False, position.reshape(1, 2),
             [stationary_path(position)],
             failureReason=reason)
-
-    degraded = not response.get("success", True)
-    if degraded:
-        append_response_message(
-            response, "短路径降级：启用历史可行域规划上下文。")
 
     reached = _reverse_point_reached(position, speed, reverse_point)
     active_reverse_point = reverse_point
@@ -180,20 +150,15 @@ def plan_agv_spatial(
         )
     except Exception as error:
         reason = "DRIVABLE_AREA_PLANNING_FAILED"
-        mark_response_failure(
-            response, reason, f"局部可行域规划失败：{error}")
         return VehicleSpatialResult(
             False, position.reshape(1, 2),
             [stationary_path(position)],
             failureReason=reason,
             reversePointReached=reached)
 
-    future_path, stop_at_route_end = _build_agv_future_path(
-        position, drivable_area_planner, active_reverse_point)
+    future_path, stop_at_route_end = _build_agv_future_path(position, drivable_area_planner, active_reverse_point)
     if not drivable_lines:
         reason = "NO_DRIVABLE_LINE"
-        mark_response_failure(
-            response, reason, "局部可行域规划失败：未生成可行域线")
         return VehicleSpatialResult(
             False,
             future_path,
@@ -215,8 +180,6 @@ def plan_agv_spatial(
         )
     except Exception as error:
         reason = "SPATIAL_PATH_SEARCH_FAILED"
-        mark_response_failure(
-            response, reason, f"空间路径搜索失败：{error}")
         return VehicleSpatialResult(
             False,
             future_path,
@@ -227,29 +190,13 @@ def plan_agv_spatial(
             reached,
         )
 
-    if not path_result.success:
-        mark_response_failure(
-            response,
-            "SPATIAL_PATH_SEARCH_FAILED",
-            f"空间路径搜索失败：{path_result.failureReason or 'NO_SPATIAL_PATH'}",
-        )
-
-    signal_candidates = [
-        apply_traffic_signal(
-            candidate,
-            drivable_area_planner.centerline_dict,
-            drivable_area_planner.connector_dict,
-            lane_signals,
-        )
-        for candidate in path_result.candidates
-    ]
     candidates = [
         build_speed_limit_path(
             candidate.xy,
             planning_max_speed,
             candidate.terminalStop,
         )
-        for candidate in signal_candidates
+        for candidate in path_result.candidates
     ]
     if not candidates:
         candidates = [stationary_path(position)]
@@ -262,6 +209,7 @@ def plan_agv_spatial(
         path_result.failureReason,
         reached,
     )
+
 
 def _build_agv_future_path(position, planner, reverse_point):
     route = clean_xy(planner.referLine)
@@ -277,13 +225,13 @@ def _build_agv_future_path(position, planner, reverse_point):
         future = np.vstack((position, future))
     future = resample_polyline(future, FUTURE_PATH_POINT_SPACING)
     stop_at_route_end = (
-        reverse_point is None
-        and end_s >= polyline_length(route) - 1e-6
+            reverse_point is None
+            and end_s >= polyline_length(route) - 1e-6
     )
     return future, stop_at_route_end
 
 
-def _build_hv_future_path(
+def _build_hv_base_path(
         position, heading, speed, route, route_progress_cache):
     route_xy = clean_xy(route) if route is not None else np.empty((0, 2))
     if len(route_xy) >= 2:
@@ -297,31 +245,37 @@ def _build_hv_future_path(
             start_s + FUTURE_PATH_LENGTH,
             polyline_length(route_xy),
         )
-        future = slice_polyline(route_xy, start_s, end_s)
-        if np.linalg.norm(future[0] - position) > 1e-6:
-            future = np.vstack((position, future))
-        return (
-            resample_polyline(future, FUTURE_PATH_POINT_SPACING),
-            end_s >= polyline_length(route_xy) - 1e-6,
-        )
+        sample_s = np.r_[
+            np.arange(start_s, end_s, FUTURE_PATH_POINT_SPACING),
+            end_s,
+        ]
+        lateral = float(projection["d"])
+        future = []
+        for value in sample_s:
+            center = point_at_s(route_xy, value)
+            tangent = tangent_at_s(route_xy, value)
+            normal = np.asarray([-tangent[1], tangent[0]])
+            future.append(center + lateral * normal)
+        future = np.asarray(future, dtype=float)
+        future[0] = position
+        return future, end_s >= polyline_length(route_xy) - 1e-6
 
-    distance = max(speed * HV_PREDICTION_HORIZON,
-                   FUTURE_PATH_POINT_SPACING)
+    prediction_distance = speed * HV_PREDICTION_HORIZON
+    if prediction_distance <= 1e-9:
+        return position.reshape(1, 2), False
+
     direction = np.asarray([math.cos(heading), math.sin(heading)])
-    return np.vstack((position, position + distance * direction)), False
+    future = np.vstack((
+        position,
+        position + prediction_distance * direction,
+    ))
+    return resample_polyline(future, FUTURE_PATH_POINT_SPACING), False
 
 
-def _build_hv_local_path(
-        future_path, speed, polygons, static_info,
-        future_reaches_route_end):
-    expected_distance = speed * HV_PREDICTION_HORIZON
-    local_path = truncate_polyline(future_path, expected_distance)
-    terminal_stop = (
-        future_reaches_route_end
-        and expected_distance >= polyline_length(future_path) - 1e-6
-    )
+def _apply_hv_obstacles(
+        base_path, polygons, static_info, reaches_route_end):
     stop_s = first_polygon_stop_s(
-        local_path,
+        base_path,
         polygons,
         static_info["length"],
         0.0,
@@ -329,15 +283,15 @@ def _build_hv_local_path(
         PATH_CURVE_SAMPLE_SPACING,
     )
     if stop_s is None:
-        return local_path, terminal_stop
-    return truncate_polyline(local_path, stop_s), True
+        return base_path, reaches_route_end
+    return truncate_polyline(base_path, stop_s), True
 
 
 def _reverse_point_reached(position, speed, reverse_point):
     return (
-        reverse_point is not None
-        and np.linalg.norm(
-            position - np.asarray(reverse_point, dtype=float)[:2]
-        ) <= REVERSE_POINT_REACH_TOLERANCE
-        and speed <= REVERSE_POINT_STOP_SPEED
+            reverse_point is not None
+            and np.linalg.norm(
+        position - np.asarray(reverse_point, dtype=float)[:2]
+    ) <= REVERSE_POINT_REACH_TOLERANCE
+            and speed <= REVERSE_POINT_STOP_SPEED
     )
