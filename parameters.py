@@ -34,6 +34,13 @@ VEHICLE_LANE_LOCATE_TOPOLOGY_DEPTH = 2  # 后续帧从上一匹配车道向左�
 
 FUTURE_PATH_LENGTH = 80.0  # 本帧用于分组、HV预测和空间规划的前向参考线长度，单位m
 FUTURE_PATH_POINT_SPACING = 1.0  # futurePath重采样点间距，单位m
+COOPERATION_PATH_POINT_SPACING = 4.0  # 协同分块内部futurePath降采样间距，单位m
+COOPERATION_LATERAL_MARGIN = 1.0  # 每辆车参与协同分块时增加的侧向安全冗余，单位m
+COOPERATION_PATH_SIMPLIFICATION_MARGIN = 0.5  # 两条4m折线近似产生的合计横向补偿，单位m
+PHYSICAL_FRONT_REAR_MIN_PROGRESS = 0.5  # 判定物理前后关系所需的最小纵向进度，单位m
+PHYSICAL_FRONT_REAR_HEADING_THRESHOLD_DEG = 30.0  # 判定物理前后关系允许的最大航向差，单位°
+PRIORITY_CONFLICT_SAMPLE_SPACING = 2.0  # 优先级冲突入口搜索的粗采样间距，单位m
+PRIORITY_CONFLICT_UPSTREAM_DISTANCE = 2.0  # 冲突锚点相对冲突区入口的上游偏移，单位m
 HV_PREDICTION_HORIZON = 3.0  # HV按当前速度匀速预测的时间范围，单位s
 AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 2.0  # AGV接近历史第二个waypoint并触发basePath重规划的距离，单位m
 

@@ -22,13 +22,12 @@ from parameters import (
     PATH_LATERAL_SAFETY_MARGIN,
 )
 
-from localPlanner.cooperationPlanner import (
-    determine_front_rear_priorities, group_by_future_paths, group_by_paths,
-    select_default_paths)
+from localPlanner.cooperationBlocker import group_by_future_paths
+from localPlanner.physicalRelationPlanner import determine_physical_front_rear_edges
+
 from localPlanner.drivableAreaPlanner import DrivableAreaPlanner
 from localPlanner.dxmPlanner import fixed_dxm
-from localPlanner.jointDecisionPlanner import (
-    calculate_block_priority, plan_block_waypoints)
+from localPlanner.priorityPlanner import calculate_block_priority
 
 from localPlanner.spatialPlanningStage import (
     build_obstacle_polygons,
@@ -80,6 +79,8 @@ class PlanningEngine:
         # AGV上一轮最终采用的完整path和最终发布的waypoint；HV每帧重新预测，不复用。
         self.vehiclePathCaches: Dict[str, Any] = {}
         self.vehicleWaypointCaches: Dict[str, Any] = {}
+        # 本帧必须重新向车端下发waypoint的车辆ID；每帧开始时清空。
+        self.vehicleIdsNeedWaypointUpdate: set[str] = set()
 
         # AV/HV统一内部静态参数：长宽、限速、最小转弯半径等。
         self.vehicleStaticInfoCaches: Dict[str, Any] = {}
@@ -311,10 +312,13 @@ class PlanningEngine:
             return True
 
         waypoints = self.vehicleWaypointCaches.get(vehicleId)
-        if waypoints is None or len(waypoints) < 2:
+        if waypoints is None or len(waypoints) == 0:
             return True
-        secondWaypoint = np.asarray(waypoints[1], dtype=float)[:2]
-        if (np.linalg.norm(position - secondWaypoint)
+        lastWaypoint = np.asarray(waypoints[-1], dtype=float)[:2]
+        lastWaypointProgress = project_to_polyline(
+            lastWaypoint, basePath)['s']
+        remainingToLastWaypoint = lastWaypointProgress - basePathProgress
+        if (remainingToLastWaypoint
                 <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE):
             return True
 
@@ -443,6 +447,8 @@ class PlanningEngine:
         self.vehicleObstacleCaches = updated
 
     def batchRoutePlan(self, requests: List[Any]) -> List[Any]:
+        self.vehicleIdsNeedWaypointUpdate.clear()
+
         # todo. 一、短路径所有输入，包括车辆动静态信息、地图、障碍物、长路径、信号灯，不能改动
         # Map<String, DeviceBsmBodyVO>，所有车辆的状态信息，包括内外车辆，静止车辆
         allVehicleStates = vehicleDynamicLocationService.getAllRealTimeBsm(None)
@@ -524,6 +530,7 @@ class PlanningEngine:
                 ]
                 continue
 
+            self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
             result = plan_agv_spatial(
                 dynamic_info=dynamicInfo,
                 static_info=staticInfo,
@@ -626,112 +633,72 @@ class PlanningEngine:
 
 
         # todo.九、基于最终选定path确定物理前后关系。
-        # 每一项为(高优先级/前车ID, 低优先级/后车ID)。
-        sequencePriorities = determine_front_rear_priorities(
+        # 每一项为(物理前车ID, 物理后车ID)，暂不与其他优先级合并。
+        physicalFrontRearEdges = determine_physical_front_rear_edges(
             cooperationBlocks,
-            selectedPaths,
+            future_path,
             self.vehicleStaticInfoCaches,
             self.vehicleDynamicInfoCaches,
         )
 
         # 九、逐协同块完成联合决策与waypoint输出
-        waypointResults = {}
-        plannedPathResults = {}
-        historicalPriorityEdges = set(self.priorityGraphCache.get("edges", ()))
+        # todo. 十、生成完整优先级。
+        # 每个协同块返回一个PriorityDecision；跨帧缓存只保存最终高->低优先级边。
+        priorityDecisions = []
+        historicalPriorityEdges = set(
+            self.priorityGraphCache.get('edges', ()))
         newPriorityEdges = set()
-        framePriorityDiagnostics = []
-        self.lastPlanningDiagnostics = {
-            "cooperationBlocks": tuple(
-                tuple(str(vehicleId) for vehicleId in block)
-                for block in cooperationBlocks),
-            "historicalPriorityEdges": tuple(sorted(historicalPriorityEdges)),
-            "priorityBlocks": framePriorityDiagnostics,
-            # 仅附加诊断输出，不参与后续分组、优先级、速度或waypoint计算。
-            "drivableLines": spatialDrivableLines,
-        }
-        # 所有request车辆（包括HV）都参与同一套优先级速度推断：高优先级车辆
-        # 已经调整后的速度曲线会继续约束低优先级车辆。HV是否遵从输出不属于规划器职责。
-        speedPlanningVehicleIds = set(selectedPaths)
-        # 历史waypoint只复用到可控AGV；HV每帧根据最新BSM重新推断，避免旧预测滞留。
-        waypointCacheVehicleIds = set(AGV_all_local_path)
-        request_indices = {
-            str(request.get('deviceId')): index
-            for index, request in enumerate(requests)
-        }
-        for cooperationBlock in cooperationBlocks:
-            try:
-                priorityResult = calculate_block_priority(
-                    cooperation_block=cooperationBlock,
-                    selected_paths=selectedPaths,
-                    sequence_priorities=sequencePriorities,
-                    system_priorities=systemPriorities,
-                    vehicle_static_info=self.vehicleStaticInfoCaches,
-                    vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
-                    historical_priority_edges=historicalPriorityEdges,
-                )
-                framePriorityDiagnostics.append({
-                    "members": tuple(priorityResult.members),
-                    "conflicts": tuple({
-                                           "vehicles": (item.vehicleA, item.vehicleB),
-                                           "rawS": (float(item.rawSA), float(item.rawSB)),
-                                           "anchorS": (float(item.anchorSA), float(item.anchorSB)),
-                                       } for item in priorityResult.conflicts),
-                    **priorityResult.searchDiagnostics,
-                })
-                blockWaypointResult = plan_block_waypoints(
-                    priority_result=priorityResult,
-                    selected_paths=selectedPaths,
-                    vehicle_static_info=self.vehicleStaticInfoCaches,
-                    vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
-                    controllable_vehicle_ids=speedPlanningVehicleIds,
-                    previous_waypoints={
-                        vehicleId: self.vehicleWaypointCaches[vehicleId]
-                        for vehicleId in cooperationBlock
-                        if vehicleId in waypointCacheVehicleIds
-                           and vehicleId in self.vehicleWaypointCaches
-                    },
-                )
-                waypointResults.update(blockWaypointResult.waypointResults)
-                plannedPathResults.update(blockWaypointResult.plannedPaths)
-                newPriorityEdges.update(priorityResult.priorityEdges)
-                for vehicleId, waypoints in blockWaypointResult.waypointResults.items():
-                    if vehicleId in waypointCacheVehicleIds:
-                        self.vehicleWaypointCaches[vehicleId] = waypoints
-            except Exception as error:
-                # 优先级/速度是块内耦合计算，异常时整块停车，其他块继续。
-                for vehicleId in cooperationBlock:
-                    index = request_indices[vehicleId]
-                    mark_vehicle_failure(self.responses, index, requests[index],
-                                         f"协同块规划失败: {error}",
-                                         code="COOPERATION_BLOCK_FAILED")
-                    stop = failure_waypoints(self.vehicleDynamicInfoCaches.get(vehicleId))
-                    if stop is not None:
-                        waypointResults[vehicleId] = stop
-                        plannedPathResults[vehicleId] = stop[:2, [0, 1, 3]].copy()
-                    self.vehicleWaypointCaches.pop(vehicleId, None)
-                newPriorityEdges = {edge for edge in newPriorityEdges
-                                    if not set(edge).intersection(cooperationBlock)}
+        dxmVehicleIds = set(self.reversePointCaches)
 
-        priorityNodes = dict(self.priorityGraphCache.get("nodes", {}))
-        for request in requests:
-            priorityNodes[str(request.get('deviceId'))] = str(request.get('deviceType'))
+        for cooperationBlock in cooperationBlocks:
+            priorityDecision = calculate_block_priority(
+                cooperation_block=cooperationBlock,
+                selected_paths=future_path,
+                physical_priorities=physicalFrontRearEdges,
+                system_priorities=systemPriorities,
+                dxm_vehicle_ids=dxmVehicleIds,
+                vehicle_static_info=self.vehicleStaticInfoCaches,
+                vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
+                historical_priority_edges=historicalPriorityEdges,
+            )
+            priorityDecisions.append(priorityDecision)
+            newPriorityEdges.update(priorityDecision.priorityEdges)
+
+        priorityNodes = dict(self.priorityGraphCache.get('nodes', {}))
+        for vehicleId in future_path:
+            priorityNodes[vehicleId] = self.vehicleStaticInfoCaches[
+                vehicleId].get('vehicleType')
         currentBsmIds = {str(vehicleId) for vehicleId in allVehicleStates}
         priorityNodes = {
             vehicleId: vehicleType
             for vehicleId, vehicleType in priorityNodes.items()
-            if vehicleType == "AGV" or vehicleId in currentBsmIds
+            if vehicleType == 'AGV' or vehicleId in currentBsmIds
         }
         self.priorityGraphCache = {
-            "nodes": priorityNodes,
-            "edges": {
+            'nodes': priorityNodes,
+            'edges': {
                 edge for edge in newPriorityEdges
                 if edge[0] in priorityNodes and edge[1] in priorityNodes
             },
         }
 
+        self.lastPlanningDiagnostics = {
+            'cooperationBlocks': tuple(
+                tuple(str(vehicleId) for vehicleId in block)
+                for block in cooperationBlocks
+            ),
+            'priorityDecisions': tuple(priorityDecisions),
+            'historicalPriorityEdges': tuple(sorted(historicalPriorityEdges)),
+            'currentPriorityEdges': tuple(sorted(newPriorityEdges)),
+            'drivableLines': spatialDrivableLines,
+        }
 
-        # 十、直接返回与requests同下标的PathPlanningResponseVO列表，补全
-        # success、失败原因和三类路径字段，不再增加finalResult包装对象。
+        # todo. 十一、根据完整优先级进行速度规划。
+
+
+        # todo. 十二、整合并输出waypoint。
+        waypointResults = {}
+        plannedPathResults = {}
         return complete_planning_responses(
             requests=requests,
             long_route_responses=self.responses,
