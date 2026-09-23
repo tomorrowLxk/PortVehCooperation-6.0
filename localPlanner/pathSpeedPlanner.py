@@ -40,41 +40,40 @@ def build_speed_envelope(
 
     segment_lengths = np.linalg.norm(
         np.diff(output[:, :2], axis=0), axis=1)
-    speed = np.maximum(0.0, output[:, 2])
-    speed[0] = min(speed[0], max(0.0, float(current_speed)))
-    acceleration = max(1e-6, float(max_acceleration))
-    deceleration = max(1e-6, float(max_deceleration))
-
-    for index, distance in enumerate(segment_lengths, start=1):
-        speed[index] = min(
-            speed[index],
-            np.sqrt(max(
-                0.0,
-                speed[index - 1] ** 2 + 2.0 * acceleration * distance,
-            )),
-        )
-
-    for index in range(len(speed) - 2, -1, -1):
-        speed[index] = min(
-            speed[index],
-            np.sqrt(max(
-                0.0,
-                speed[index + 1] ** 2
-                + 2.0 * deceleration * segment_lengths[index],
-            )),
-        )
-
-    for index, distance in enumerate(segment_lengths, start=1):
-        speed[index] = min(
-            speed[index],
-            np.sqrt(max(
-                0.0,
-                speed[index - 1] ** 2 + 2.0 * acceleration * distance,
-            )),
-        )
-
-    output[:, 2] = speed
+    output[:, 2] = speed_envelope_values(
+        output[:, 2],
+        segment_lengths,
+        current_speed,
+        max_acceleration,
+        max_deceleration,
+    )
     return output
+
+
+def speed_envelope_values(
+        speed_limits, segment_lengths, current_speed,
+        max_acceleration, max_deceleration):
+    """用等价的向量累计最小运算完成前向、后向、前向三次约束。"""
+    speed_squared = np.square(np.maximum(
+        0.0, np.asarray(speed_limits, dtype=float)))
+    speed_squared[0] = min(
+        speed_squared[0], max(0.0, float(current_speed)) ** 2)
+    distances = np.asarray(segment_lengths, dtype=float)
+
+    def forward(values, intervals, acceleration):
+        increments = np.concatenate((
+            [0.0],
+            np.cumsum(2.0 * max(1e-6, float(acceleration)) * intervals),
+        ))
+        return increments + np.minimum.accumulate(values - increments)
+
+    speed_squared = forward(
+        speed_squared, distances, max_acceleration)
+    speed_squared = forward(
+        speed_squared[::-1], distances[::-1], max_deceleration)[::-1]
+    speed_squared = forward(
+        speed_squared, distances, max_acceleration)
+    return np.sqrt(np.maximum(0.0, speed_squared))
 
 
 def stationary_path(position):

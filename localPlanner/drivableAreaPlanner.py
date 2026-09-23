@@ -68,6 +68,24 @@ class DrivableAreaPlanner:
         self.connector_dict = connectors
         self.routeStages = route_stages
         self.connectionBounds = connection_bounds
+        self.feasibleLaneIds = frozenset(
+            lane for stage in self.routeStages for lane in stage
+        )
+        lane_stage_indices = {}
+        for stage_index, stage in enumerate(self.routeStages):
+            for lane in stage:
+                lane_stage_indices.setdefault(lane, []).append(stage_index)
+        self.laneStageIndices = {
+            lane: tuple(indices)
+            for lane, indices in lane_stage_indices.items()
+        }
+        self.laneCumulativeS = {
+            lane: np.concatenate((
+                [0.0],
+                np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1)),
+            ))
+            for lane, line in self.centerline_dict.items()
+        }
         (
             self.routeStageBounds,
             self.routeStageReferenceLaneIds,
@@ -349,10 +367,7 @@ class DrivableAreaPlanner:
             if info['right_lane'] is not None:
                 candidates.add(info['right_lane'])
 
-        feasible_lanes = {
-            lane for stage in self.routeStages for lane in stage
-        }
-        return candidates & feasible_lanes
+        return candidates & self.feasibleLaneIds
 
     def _find_reverse_stage(self, reverse_point):
         if reverse_point is None:
@@ -389,23 +404,17 @@ class DrivableAreaPlanner:
         if initial:
             first_lane = self.referLaneIds[0]
             initial_lanes = [first_lane]
-            feasible_lanes = {
-                lane for stage in self.routeStages for lane in stage
-            }
             initial_lanes.extend(
                 lane
                 for lane in self.connector_dict[first_lane]['successor']
-                if lane in feasible_lanes
+                if lane in self.feasibleLaneIds
             )
 
             for candidate_order, lane in enumerate(initial_lanes):
                 lane_s, distance = self._project_to_line(
                     position, self.centerline_dict[lane]
                 )
-                stage_index = next(
-                    index for index, stage in enumerate(self.routeStages)
-                    if lane in stage
-                )
+                stage_index = self.laneStageIndices[lane][0]
                 ranked.append((
                     distance,
                     candidate_order,
@@ -424,8 +433,8 @@ class DrivableAreaPlanner:
             if distance > VEHICLE_LANE_LOCATE_MAX_DISTANCE:
                 continue
 
-            lengths = np.linalg.norm(np.diff(line, axis=0), axis=1)
-            arc = np.concatenate(([0.0], np.cumsum(lengths)))
+            arc = self.laneCumulativeS[lane]
+            lengths = np.diff(arc)
             segment_index = min(
                 int(np.searchsorted(arc, lane_s, side='right') - 1),
                 len(lengths) - 1,
@@ -440,11 +449,10 @@ class DrivableAreaPlanner:
             if angle_error > np.pi / 2.0:
                 continue
 
-            occurrences = [
-                index for index, stage in enumerate(self.routeStages)
-                if lane in stage
-                   and index >= self.lastRouteStageIndex
-            ]
+            occurrences = (
+                index for index in self.laneStageIndices[lane]
+                if index >= self.lastRouteStageIndex
+            )
             for stage_index in occurrences:
                 if (self.reverseStageIndex is not None
                         and not self.passedReversePoint
@@ -779,16 +787,18 @@ class DrivableAreaPlanner:
 
         # 前后车道存在几何重叠时，记录每条有向连接的无重叠拼接边界。
         connection_bounds = {}
+        lane_lengths = {
+            lane: float(np.linalg.norm(
+                np.diff(line, axis=0), axis=1
+            ).sum())
+            for lane, line in local_centerlines.items()
+        }
         for lane, info in local_connectors.items():
             upstream = local_centerlines[lane]
-            upstream_length = float(np.linalg.norm(
-                np.diff(upstream, axis=0), axis=1
-            ).sum())
+            upstream_length = lane_lengths[lane]
             for successor in info['successor']:
                 downstream = local_centerlines[successor]
-                downstream_length = float(np.linalg.norm(
-                    np.diff(downstream, axis=0), axis=1
-                ).sum())
+                downstream_length = lane_lengths[successor]
                 from_end_s = upstream_length
                 to_start_s = 0.0
 
@@ -815,14 +825,9 @@ class DrivableAreaPlanner:
                     'toStartS': to_start_s,
                 }
 
-        map_centerlines = {
-            lane: np.asarray(line, dtype=float)[:, :2]
-            for lane, line in centerline_dict.items()
-        }
-        map_connectors = dict(connector_dict)
         return (
-            map_centerlines,
-            map_connectors,
+            local_centerlines,
+            local_connectors,
             route_stages,
             connection_bounds,
         )

@@ -59,11 +59,13 @@ PATH_LANE_CHANGE_PENALTY = 10.0  # 4.0占位选优中每次跨可行域线的代
 PATH_CURVATURE_WEIGHT = 0.5  # 4.0占位选优中最大曲率的权重
 PATH_CURVATURE_SPEED_COEFFICIENT = 3.0  # 曲率速度上限公式1/(系数*曲率)中的系数
 PATH_CURVATURE_MIN_SPEED = 2.77  # 曲率限速非停车点允许的最低速度上限，单位m/s
-TRAFFIC_SIGNAL_MATCH_DISTANCE = 5.0  # path???????????????????????m
-TRAFFIC_SIGNAL_HEADING_WINDOW = 10.0  # ??????????????path?????m
-TRAFFIC_SIGNAL_HEADING_AFTER_WINDOW = 20.0  # ??????????????path?????m
-TRAFFIC_SIGNAL_TURN_THRESHOLD_DEG = 15.0  # ?????????????????deg
-TRAFFIC_SIGNAL_UTURN_THRESHOLD_DEG = 135.0  # ????????????????deg
+TRAFFIC_SIGNAL_MATCH_DISTANCE = 5.0  # path与进口道末端匹配的最大距离，单位m
+TRAFFIC_SIGNAL_STOP_DISTANCE = 5.0  # 信控停车位置相对进口道末端的上游距离，单位m
+TRAFFIC_SIGNAL_GREEN_ETA_MARGIN = 2.0  # 当前为绿灯时叠加到ETA上的保守时间，单位s
+TRAFFIC_SIGNAL_HEADING_WINDOW = 10.0  # 信控方向判断使用的上游path长度，单位m
+TRAFFIC_SIGNAL_HEADING_AFTER_WINDOW = 20.0  # 信控方向判断使用的下游path长度，单位m
+TRAFFIC_SIGNAL_TURN_THRESHOLD_DEG = 15.0  # 直行与左右转的航向变化分界，单位deg
+TRAFFIC_SIGNAL_UTURN_THRESHOLD_DEG = 135.0  # 掉头方向的最小航向变化，单位deg
 
 DEFAULT_AGV_STATIC_INFO = {
     "length": 14.8,             # AGV车辆长度，单位m
