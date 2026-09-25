@@ -38,16 +38,20 @@ def build_future_path(
         base_path, current_position, current_speed,
         max_acceleration, max_deceleration,
         centerline_dict, connector_dict, lane_signals,
-        eligible_lane_ids=None):
+        base_path_lane_ids=None):
     """裁剪已驶过部分、处理第一个信控并生成最终速度包络。"""
-    path = _trim_passed_path(base_path, current_position)
+    path, point_lane_ids = _trim_passed_path(
+        base_path,
+        current_position,
+        base_path_lane_ids,
+    )
     if len(path) >= 2 and lane_signals:
         signal = _first_signal(
             path,
             centerline_dict,
             connector_dict,
             lane_signals,
-            eligible_lane_ids,
+            point_lane_ids,
         )
         if signal is not None:
             stop_s, state = signal
@@ -81,17 +85,29 @@ def build_future_path(
     )
 
 
+def classify_path_lane_ids(path, centerline_dict, connector_dict):
+    """在basePath生成时一次性确定每个离散点所属的车道。"""
+    path_xy = clean_xy(path)
+    if len(path_xy) < 2:
+        return np.full(len(path_xy), None, dtype=object)
+    return np.asarray(_classify_points(
+        path_xy,
+        centerline_dict,
+        connector_dict,
+        sorted(centerline_dict),
+    ), dtype=object)
+
+
 def _first_signal(
         path, centerline_dict, connector_dict, lane_signals,
-        eligible_lane_ids):
+        point_lane_ids=None):
     """按path行驶顺序返回第一个信控的停车弧长和方向状态。"""
     path_xy = clean_xy(path)
-    lanes = _available_lanes(centerline_dict, eligible_lane_ids)
-    if not lanes:
-        return None
-
-    point_lanes = np.asarray(_classify_points(
-        path_xy, centerline_dict, connector_dict, lanes), dtype=object)
+    point_lanes = (
+        classify_path_lane_ids(path_xy, centerline_dict, connector_dict)
+        if point_lane_ids is None
+        else np.asarray(point_lane_ids, dtype=object)
+    )
     candidates = []
     for lane_id in lane_signals:
         indices = np.flatnonzero(point_lanes == lane_id)
@@ -116,17 +132,57 @@ def _first_signal(
     return None
 
 
-def _trim_passed_path(path, current_position):
+def _trim_passed_path(
+        path, current_position, base_path_lane_ids=None):
     values = np.asarray(path, dtype=float)
     position = np.asarray(current_position, dtype=float)[:2]
     path_length = polyline_length(values)
     if len(values) < 2 or path_length <= 1e-9:
-        return np.asarray([[position[0], position[1], 0.0]])
+        lane_ids = (
+            None if base_path_lane_ids is None
+            else np.asarray([base_path_lane_ids[0]], dtype=object)
+        )
+        return np.asarray([[position[0], position[1], 0.0]]), lane_ids
 
     progress = project_to_polyline(position, values)['s']
     output = _slice_path(values, progress, path_length)
     output[0, :2] = position
-    return output
+    lane_ids = (
+        None if base_path_lane_ids is None
+        else _slice_lane_ids(values, base_path_lane_ids, progress, path_length)
+    )
+    return output, lane_ids
+
+
+def _slice_lane_ids(path, lane_ids, start_s, end_s):
+    """按照与_slice_path完全相同的切片规则同步裁剪逐点laneId。"""
+    values = np.asarray(path, dtype=float)
+    labels = np.asarray(lane_ids, dtype=object)
+    lengths = np.linalg.norm(np.diff(values[:, :2], axis=0), axis=1)
+    arc = np.concatenate(([0.0], np.cumsum(lengths)))
+    start = float(np.clip(start_s, 0.0, arc[-1]))
+    end = float(np.clip(end_s, start, arc[-1]))
+
+    def label_at(target):
+        index = min(
+            int(np.searchsorted(arc, target, side='right') - 1),
+            len(values) - 2,
+        )
+        ratio = (
+            (target - arc[index]) / lengths[index]
+            if lengths[index] > 1e-9 else 0.0
+        )
+        return labels[index] if ratio <= 0.5 else labels[index + 1]
+
+    output = [label_at(start)]
+    output.extend(
+        labels[index]
+        for index in range(1, len(values) - 1)
+        if start + 1e-9 < arc[index] < end - 1e-9
+    )
+    if end > start + 1e-9:
+        output.append(label_at(end))
+    return np.asarray(output, dtype=object)
 
 
 def _estimate_arrival_time(
@@ -181,17 +237,6 @@ def _slice_path(path, start_s, end_s):
     if end > start + 1e-9:
         output.append(row_at(end))
     return np.asarray(output, dtype=float)
-
-
-def _available_lanes(centerline_dict, eligible_lane_ids):
-    lane_ids = (
-        centerline_dict.keys()
-        if eligible_lane_ids is None else eligible_lane_ids
-    )
-    return sorted({
-        str(lane_id) for lane_id in lane_ids
-        if lane_id is not None and str(lane_id) in centerline_dict
-    })
 
 
 def _classify_points(path, centerline_dict, connector_dict, lanes):

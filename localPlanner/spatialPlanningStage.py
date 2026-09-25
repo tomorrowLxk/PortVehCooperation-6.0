@@ -40,7 +40,6 @@ from parameters import (
 @dataclass
 class VehicleSpatialResult:
     success: bool
-    futurePath: np.ndarray
     candidatePaths: list[np.ndarray] = field(default_factory=list)
     drivableLines: tuple[np.ndarray, ...] = ()
     failureReason: str | None = None
@@ -117,7 +116,10 @@ def plan_hv_spatial(
         planning_max_speed,
         terminal_stop,
     )
-    return VehicleSpatialResult(True, base_path, [speed_path])
+    return VehicleSpatialResult(
+        success=True,
+        candidatePaths=[speed_path],
+    )
 
 
 def plan_agv_spatial(
@@ -131,9 +133,10 @@ def plan_agv_spatial(
     if drivable_area_planner is None:
         reason = "NO_DRIVABLE_AREA_PLANNER"
         return VehicleSpatialResult(
-            False, position.reshape(1, 2),
-            [stationary_path(position)],
-            failureReason=reason)
+            success=False,
+            candidatePaths=[stationary_path(position)],
+            failureReason=reason,
+        )
 
     reached = _reverse_point_reached(position, speed, reverse_point)
     active_reverse_point = reverse_point
@@ -151,20 +154,21 @@ def plan_agv_spatial(
     except Exception as error:
         reason = "DRIVABLE_AREA_PLANNING_FAILED"
         return VehicleSpatialResult(
-            False, position.reshape(1, 2),
-            [stationary_path(position)],
+            success=False,
+            candidatePaths=[stationary_path(position)],
             failureReason=reason,
-            reversePointReached=reached)
+            reversePointReached=reached,
+        )
 
     future_path, stop_at_route_end = _build_agv_future_path(position, drivable_area_planner, active_reverse_point)
     if not drivable_lines:
         reason = "NO_DRIVABLE_LINE"
         return VehicleSpatialResult(
-            False,
-            future_path,
-            [stationary_path(position)],
+            success=False,
+            candidatePaths=[stationary_path(position)],
             failureReason=reason,
-            reversePointReached=reached)
+            reversePointReached=reached,
+        )
 
     try:
         path_result = plan_spatial_path(
@@ -181,13 +185,14 @@ def plan_agv_spatial(
     except Exception as error:
         reason = "SPATIAL_PATH_SEARCH_FAILED"
         return VehicleSpatialResult(
-            False,
-            future_path,
-            [stationary_path(position)],
-            tuple(np.asarray(line, dtype=float).copy()
-                  for line in drivable_lines),
-            reason,
-            reached,
+            success=False,
+            candidatePaths=[stationary_path(position)],
+            drivableLines=tuple(
+                np.asarray(line, dtype=float).copy()
+                for line in drivable_lines
+            ),
+            failureReason=reason,
+            reversePointReached=reached,
         )
 
     candidates = [
@@ -201,13 +206,14 @@ def plan_agv_spatial(
     if not candidates:
         candidates = [stationary_path(position)]
     return VehicleSpatialResult(
-        path_result.success,
-        future_path,
-        candidates,
-        tuple(np.asarray(line, dtype=float).copy()
-              for line in drivable_lines),
-        path_result.failureReason,
-        reached,
+        success=path_result.success,
+        candidatePaths=candidates,
+        drivableLines=tuple(
+            np.asarray(line, dtype=float).copy()
+            for line in drivable_lines
+        ),
+        failureReason=path_result.failureReason,
+        reversePointReached=reached,
     )
 
 

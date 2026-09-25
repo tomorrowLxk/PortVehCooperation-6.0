@@ -570,6 +570,14 @@ class DrivableAreaPlanner:
             'routeS': self.lastRouteS,
         }
 
+    def update_position_match(self, dynamicInfo, reversePoint=None):
+        """只更新车辆在完整可行域和全局参考线上的匹配进度。"""
+        return self._update_position_match(
+            dynamicInfo,
+            reversePoint,
+            initial=False,
+        )
+
     def _build_stage_ranges(self, route_stages, connector_dict,
                             centerline_dict, route_lane_ids, route):
         "计算每个route阶段中各车道真正可使用的纵向区间。"
