@@ -1,6 +1,7 @@
 "车辆任务级完整可行域及本帧局部可行域规划。"
 
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -19,21 +20,44 @@ from parameters import (
 )
 
 
+@dataclass(frozen=True)
+class DrivableLineSegment:
+    "一条局部可行域线中的有序车道段及其在线上的累计弧长范围。"
+    laneId: str
+    startS: float
+    endS: float
+    isJunction: bool
+
+
+@dataclass(frozen=True)
+class DrivableLine:
+    "兼容坐标数组的局部可行域线，同时保留每一段的真实车道ID。"
+    points: np.ndarray
+    laneSegments: tuple[DrivableLineSegment, ...]
+
+    def __array__(self, dtype=None, copy=None):
+        array = np.asarray(self.points, dtype=dtype)
+        return array.copy() if copy else array
+
+
 class DrivableAreaPlanner:
     "保存单车当前任务的完整可行域和跨帧位置匹配进度。"
 
     def __init__(self, connector_dict, centerline_dict, referLaneIds, referLine,
                  dynamicInfo, reversePoint=None,
-                 forbiddenLaneIds=None, mapVersion=None):
+                 forbiddenLaneIds=None, mapVersion=None,
+                 junctionLaneIds=None):
         self.reset_planning_context(
             connector_dict, centerline_dict, referLaneIds, referLine,
             dynamicInfo, reversePoint, forbiddenLaneIds, mapVersion,
+            junctionLaneIds,
         )
 
     def reset_planning_context(self, connector_dict, centerline_dict,
                                referLaneIds, referLine,
                                dynamicInfo, reversePoint=None,
-                               forbiddenLaneIds=None, mapVersion=None):
+                               forbiddenLaneIds=None, mapVersion=None,
+                               junctionLaneIds=None):
         """使用新的地图和长路径重建任务级完整可行域。"""
         lane_ids = list(referLaneIds)
         route = np.asarray(referLine, dtype=float)[:, :2].copy()
@@ -68,6 +92,7 @@ class DrivableAreaPlanner:
         self.connector_dict = connectors
         self.routeStages = route_stages
         self.connectionBounds = connection_bounds
+        self.junctionLaneIds = frozenset(junctionLaneIds or ())
         self.feasibleLaneIds = frozenset(
             lane for stage in self.routeStages for lane in stage
         )
@@ -802,23 +827,25 @@ class DrivableAreaPlanner:
                 from_end_s = upstream_length
                 to_start_s = 0.0
 
+                # 优先完整保留上游车道，并删除下游车道与其重叠的开头。
+                # 这样车辆已经驶到上游末端时，拼线不会退回下游起点。
                 projected_s, distance = self._project_to_line(
-                    downstream[0], upstream
+                    upstream[-1], downstream
                 )
                 if (distance <= FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE
                         and projected_s
-                        < upstream_length
-                        - FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE):
-                    from_end_s = projected_s
+                        > FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE):
+                    to_start_s = min(projected_s, downstream_length)
                 else:
                     projected_s, distance = self._project_to_line(
-                        upstream[-1], downstream
+                        downstream[0], upstream
                     )
                     if (distance
                             <= FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE
                             and projected_s
-                            > FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE):
-                        to_start_s = min(projected_s, downstream_length)
+                            < upstream_length
+                            - FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE):
+                        from_end_s = projected_s
 
                 connection_bounds[(lane, successor)] = {
                     'fromEndS': from_end_s,
@@ -927,6 +954,12 @@ class DrivableAreaPlanner:
     def _target_lane_ends(self, target_stage_index, target_point):
         target_ends = {}
         for lane, lane_range in self.routeStages[target_stage_index].items():
+            # 按候选终点车道ID判断；若它是交叉口内虚拟车道，
+            # 终点放到该车道末端，不继续额外拼接出口道路。
+            if lane in self.junctionLaneIds:
+                target_ends[lane] = lane_range['endS']
+                continue
+
             lane_s, _ = self._project_to_line(
                 target_point, self.centerline_dict[lane]
             )
@@ -960,6 +993,8 @@ class DrivableAreaPlanner:
         lane = first_lane
         previous_lane = None
         parts = []
+        lane_segments = []
+        accumulated_s = 0.0
 
         for stage_index in range(current_stage_index,
                                  target_stage_index + 1):
@@ -1009,11 +1044,29 @@ class DrivableAreaPlanner:
                     end_s = min(end_s, connection['fromEndS'])
 
             if end_s > start_s + 1e-6:
-                part = self._slice_line(line, start_s, end_s)
-                if parts and np.linalg.norm(parts[-1][-1] - part[0]) < 1e-6:
-                    part = part[1:]
+                part = self._resample_line(
+                    self._slice_line(line, start_s, end_s),
+                    DRIVABLE_LINE_POINT_SPACING,
+                )
+                segment_start_s = accumulated_s
+                if parts:
+                    gap = float(np.linalg.norm(parts[-1][-1] - part[0]))
+                    if gap < 1e-6:
+                        part = part[1:]
                 if len(part):
+                    if parts:
+                        accumulated_s += self._line_length(
+                            np.vstack((parts[-1][-1], part))
+                        )
+                    else:
+                        accumulated_s += self._line_length(part)
                     parts.append(part)
+                    lane_segments.append(DrivableLineSegment(
+                        laneId=lane,
+                        startS=segment_start_s,
+                        endS=accumulated_s,
+                        isJunction=lane in self.junctionLaneIds,
+                    ))
 
             previous_lane = lane
             lane = next_lane
@@ -1023,9 +1076,7 @@ class DrivableAreaPlanner:
         result = np.concatenate(parts)
         if len(result) < 2 or self._line_length(result) <= 1e-6:
             return None
-        return self._resample_line(
-            result, DRIVABLE_LINE_POINT_SPACING
-        )
+        return DrivableLine(result, tuple(lane_segments))
 
     def plan(self, currentPosition, currentHeading=0.0,
              currentSpeed=0.0, reversePoint=None):
@@ -1080,7 +1131,7 @@ class DrivableAreaPlanner:
             candidates.append((
                 lane,
                 line,
-                self._line_similarity(line),
+                self._line_similarity(line.points),
             ))
 
         candidates.sort(key=lambda item: (

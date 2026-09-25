@@ -219,14 +219,19 @@ def plan_spatial_path(
         return PathPlanResult(False, failureReason="INVALID_REFERENCE_LINE")
 
     lines = []
+    line_lane_segments = []
     for raw_line in drivable_lines:
-        line = clean_xy(raw_line)
+        line = clean_xy(getattr(raw_line, 'points', raw_line))
         if len(line) >= 2:
             lines.append(line)
+            line_lane_segments.append(tuple(
+                getattr(raw_line, 'laneSegments', ())
+            ))
     if not lines:
         return PathPlanResult(False, failureReason="NO_DRIVABLE_LINE")
     graph = _build_graph(
-        lines, current, float(current_heading), reference, polygons,
+        lines, line_lane_segments,
+        current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
     )
 
@@ -355,7 +360,8 @@ def select_optimal_paths(candidates, reference_line):
 
 
 def _build_graph(
-        lines, current, current_heading, reference, polygons,
+        lines, line_lane_segments,
+        current, current_heading, reference, polygons,
         static_info, dynamic_info, reverse_point):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
@@ -397,18 +403,51 @@ def _build_graph(
             total,
             PATH_NODE_SPACING,
         )
+        lane_segments = line_lane_segments[line_index]
+        if lane_segments:
+            # 普通车道仍按固定间距放置P点；交叉口内虚拟车道不切分，
+            # 在搜索图中只保留该车道的头、尾节点。
+            sample_s = [
+                float(value) for value in sample_s
+                if any(
+                    not segment.isJunction
+                    and segment.startS - 1e-6 <= value
+                    <= segment.endS + 1e-6
+                    for segment in lane_segments
+                )
+            ]
         specifications = [
             (float(value), {"P"}, "P")
             for value in sample_s
             if not interval_contains(blocked[line_index], value)
         ]
+
+        for segment_index, segment in enumerate(lane_segments):
+            if not segment.isJunction:
+                continue
+            for boundary_index, value in enumerate(
+                    (segment.startS, segment.endS)):
+                if (value <= line_start_s + 1e-6
+                        or value > total + 1e-6
+                        or interval_contains(blocked[line_index], value)):
+                    continue
+                specifications.append((
+                    float(value), {"P"},
+                    f"J{segment_index}_{boundary_index}",
+                ))
+
         for obstacle_index, interval in enumerate(blocked[line_index]):
+            if any(
+                    segment.isJunction
+                    and segment.startS + 1e-6 < interval.startS
+                    < segment.endS - 1e-6
+                    for segment in lane_segments):
+                continue
             specifications.append((
                 float(interval.startS), {"T"}, f"T{obstacle_index}"))
 
         if not interval_contains(blocked[line_index], total):
             specifications.append((total, {"G"}, "G"))
-
         values = [item[0] for item in specifications]
         points, headings = metric.values_at(values)
         reference_projections = reference_metric.project_many(points)
