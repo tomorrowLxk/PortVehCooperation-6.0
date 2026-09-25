@@ -37,6 +37,7 @@ from localPlanner.spatialPlanningStage import (
     plan_hv_spatial,
 )
 from localPlanner.pathCollision import path_vehicle_intersects
+from localPlanner.responsePlanner import build_response_path_lists
 from localPlanner.pathGeometry import (
     polyline_length,
     project_to_polyline,
@@ -48,8 +49,15 @@ from localPlanner.waypointCandidatePlanner import (
     build_future_waypoint_candidates,
     match_current_junction_lane,
 )
-from localPlanner.waypointWholePlanner import plan_block_waypoint_whole
-from localPlanner.waypointSparsePlanner import build_waypoint_sparse
+from localPlanner.waypointWholePlanner import (
+    align_old_waypoint_whole,
+    plan_block_waypoint_whole,
+    should_replace_waypoint_whole,
+)
+from localPlanner.waypointSparsePlanner import (
+    build_hv_waypoint_sparse,
+    build_waypoint_sparse,
+)
 
 
 
@@ -65,8 +73,9 @@ class PlanningEngine:
         with connectorFile.open("rb") as file:
             self.connector_dict = pickle.load(file)
 
-        # 最终输出
+        # 长路径计算结果
         self.responses = None
+        self.shortPathFailedVehicleIds = []
 
         # 必要的，储存地图版本
         self.map_version = "0827"
@@ -105,8 +114,7 @@ class PlanningEngine:
         # HV只沿route定位，单独维护弧长进度，不实例化可行域规划器。
         self.vehicleRouteProgressCaches: Dict[str, Dict[str, Any]] = {}
 
-        # 全局优先级有向图与协同分块无关。edges只保留上一帧仍有冲突的
-        # 高->低关系；AGV节点长期保留，消失于BSM的HV节点在每帧末删除。
+        # 全局优先级有向图与协同分块无关。edges只保留上一帧仍有冲突的，高->低关系；AGV节点长期保留，消失于BSM的HV节点在每帧末删除。
         self.priorityGraphCache: Dict[str, Any] = {
             "nodes": {},
             "edges": set(),
@@ -765,8 +773,8 @@ class PlanningEngine:
             'futureWaypointCandidates': futureWaypointCandidates,
         }
 
-        # todo. 十一、根据完整优先级进行速度规划。输出waypointWhole
-        waypointWholeResults = {}
+        # todo. 十一、根据完整优先级进行速度规划。输出本帧全量newWaypointWhole
+        newWaypointWholeResults = {}
         for priorityDecision in priorityDecisions:
             blockWaypointWhole = plan_block_waypoint_whole(
                 priority_decision=priorityDecision,
@@ -775,41 +783,90 @@ class PlanningEngine:
                 vehicle_static_info=self.vehicleStaticInfoCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
             )
-            waypointWholeResults.update(blockWaypointWhole)
-        self.waypointWholeResults = waypointWholeResults
+            newWaypointWholeResults.update(blockWaypointWhole)
         self.lastPlanningDiagnostics['waypointWhole'] = {
             vehicleId: result.as_dict()
-            for vehicleId, result in waypointWholeResults.items()
+            for vehicleId, result in newWaypointWholeResults.items()
         }
 
-        # todo. 十二、整合并输出waypointSparse。
+        # todo. 十二、比较新旧waypointWhole，仅为确实变化的AGV更新waypointSparse。
         waypointSparseResults = {}
-        for vehicleId, waypointWhole in waypointWholeResults.items():
+        for vehicleId, newWaypointWhole in newWaypointWholeResults.items():
+            if self.vehicleStaticInfoCaches[vehicleId].get('vehicleType') != 'AGV':
+                waypointSparseResults[vehicleId] = build_hv_waypoint_sparse(
+                    newWaypointWhole,
+                    self.vehicleDynamicInfoCaches[vehicleId],
+                )
+                continue
+
+            oldWaypointWhole = self.waypointWholeResults.get(vehicleId)
+            useNewWaypointWhole = (
+                vehicleId in self.vehicleIdsNeedWaypointUpdate
+                or oldWaypointWhole is None
+                or vehicleId not in self.vehicleWaypointCaches
+            )
+            if not useNewWaypointWhole:
+                alignedOldWaypointWhole = align_old_waypoint_whole(
+                    oldWaypointWhole,
+                    self.vehicleDynamicInfoCaches[vehicleId]['position'],
+                )
+                useNewWaypointWhole = should_replace_waypoint_whole(
+                    alignedOldWaypointWhole,
+                    newWaypointWhole,
+                )
+            if not useNewWaypointWhole:
+                waypointSparseResults[vehicleId] = (
+                    self.vehicleWaypointCaches[vehicleId].copy()
+                )
+                continue
+
             waypointSparse = build_waypoint_sparse(
-                waypoint_whole=waypointWhole,
+                waypoint_whole=newWaypointWhole,
                 dynamic_info=self.vehicleDynamicInfoCaches[vehicleId],
                 junction_entrance=self.vehicleJunctionEntranceCaches.get(
                     vehicleId),
                 centerline_dict=CenterlineDict,
             )
             waypointSparseResults[vehicleId] = waypointSparse
+            self.waypointWholeResults[vehicleId] = newWaypointWhole
             self.vehicleWaypointCaches[vehicleId] = waypointSparse.copy()
+            self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
 
         self.lastPlanningDiagnostics['waypointSparse'] = {
             vehicleId: value.copy()
             for vehicleId, value in waypointSparseResults.items()
         }
 
-        # todo. 十三、填充response
-        return complete_planning_responses(
-            requests=requests,
-            long_route_responses=self.responses,
-            waypoint_results=waypointResults,
-            planned_paths=plannedPathResults,
-            drivable_area_planners=self.drivableAreaPlannerCaches,
-            vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
-        )
+        # todo. 十三、按request顺序向长路径response填充短路径结果。
+        for requestIndex, request in enumerate(requests):
+            vehicleId = str(request.get('deviceId'))
+            response = self.responses[requestIndex]
+            planner = self.drivableAreaPlannerCaches.get(vehicleId)
+            if planner is None:
+                responseCenterlines = CenterlineDict
+                responseConnectors = ConnectorDict
+                responseLaneIds = self.vehicleLaneIDCaches.get(vehicleId, ())
+                responseJunctionLaneIds = junctionLaneIds
+            else:
+                responseCenterlines = planner.centerline_dict
+                responseConnectors = planner.connector_dict
+                responseLaneIds = planner.feasibleLaneIds
+                responseJunctionLaneIds = planner.junctionLaneIds
 
-        # 把短路径规划失败的车辆
+            shortPathList, mergePathList = build_response_path_lists(
+                waypoints=waypointSparseResults[vehicleId],
+                planned_path=self.vehiclePathCaches[vehicleId],
+                centerline_dict=responseCenterlines,
+                connector_dict=responseConnectors,
+                lane_ids=responseLaneIds,
+                junction_lane_ids=responseJunctionLaneIds,
+                full_path_list=response.get('fullPathList') or (),
+                request=request,
+            )
+            response['shortPathList'] = shortPathList
+            response['mergePathList'] = mergePathList
 
-        return finalResponse
+        #todo. 十四、 把短路径规划失败的车辆单列出来
+        self.shortPathFailedVehicleIds = []
+
+        return self.responses
