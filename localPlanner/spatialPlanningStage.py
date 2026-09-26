@@ -42,6 +42,7 @@ class VehicleSpatialResult:
     success: bool
     candidatePaths: list[np.ndarray] = field(default_factory=list)
     drivableLines: tuple[np.ndarray, ...] = ()
+    searchNodePaths: tuple[np.ndarray, ...] = ()
     failureReason: str | None = None
     reversePointReached: bool = False
 
@@ -195,6 +196,10 @@ def plan_agv_spatial(
             reversePointReached=reached,
         )
 
+    searchNodePaths = tuple(
+        np.asarray(nodePath, dtype=float).copy()
+        for nodePath in path_result.searchNodePaths
+    )
     candidates = [
         build_speed_limit_path(
             candidate.xy,
@@ -212,6 +217,7 @@ def plan_agv_spatial(
             np.asarray(line, dtype=float).copy()
             for line in drivable_lines
         ),
+        searchNodePaths=searchNodePaths,
         failureReason=path_result.failureReason,
         reversePointReached=reached,
     )
@@ -219,11 +225,25 @@ def plan_agv_spatial(
 
 def _build_agv_future_path(position, planner, reverse_point):
     route = clean_xy(planner.referLine)
+    route_length = polyline_length(route)
     start_s = float(planner.lastRouteS)
-    end_s = min(start_s + FUTURE_PATH_LENGTH, polyline_length(route))
+    phase_end_s = route_length
     if reverse_point is not None and not planner.passedReversePoint:
-        reverse_s = planner.routeStageBounds[planner.reverseStageIndex][1]
-        end_s = min(end_s, reverse_s)
+        phase_end_s = min(
+            phase_end_s,
+            float(planner.routeStageBounds[planner.reverseStageIndex][1]),
+        )
+
+    end_s = min(start_s + FUTURE_PATH_LENGTH, phase_end_s)
+    for stage_index, (_, stage_end_s) in enumerate(planner.routeStageBounds):
+        if end_s > float(stage_end_s) + 1e-6:
+            continue
+        if any(
+                lane_id in planner.junctionLaneIds
+                for lane_id in planner.routeStages[stage_index]):
+            end_s = min(float(stage_end_s), phase_end_s)
+        break
+
     future = slice_polyline(route, start_s, end_s)
     if len(future) == 0:
         future = position.reshape(1, 2)
@@ -232,7 +252,7 @@ def _build_agv_future_path(position, planner, reverse_point):
     future = resample_polyline(future, FUTURE_PATH_POINT_SPACING)
     stop_at_route_end = (
             reverse_point is None
-            and end_s >= polyline_length(route) - 1e-6
+            and end_s >= route_length - 1e-6
     )
     return future, stop_at_route_end
 

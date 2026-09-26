@@ -63,6 +63,7 @@ class PathPlanResult:
     success: bool
     candidates: list[PathCandidate] = field(default_factory=list)
     failureReason: str | None = None
+    searchNodePaths: tuple[np.ndarray, ...] = ()
 
 
 @dataclass
@@ -234,6 +235,7 @@ def plan_spatial_path(
         current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
     )
+    searchNodePaths = []
 
     immediate = []
     immediate.extend((node_id, "REVERSE_POINT")
@@ -253,10 +255,11 @@ def plan_spatial_path(
             )])
 
     for goal_id in graph.goals:
-        candidates, collision_pairs, curvature_pairs = _strict_candidates(
+        candidates, safeNodePaths, _, _ = _strict_candidates(
             graph, goal_id, reference, polygons,
             vehicle_static_info, vehicle_dynamic_info,
         )
+        searchNodePaths.extend(safeNodePaths)
         if candidates:
             terminal = graph.nodes[goal_id]
             stop = "R" in terminal.roles or (
@@ -273,12 +276,10 @@ def plan_spatial_path(
                 for item in candidates
             ]
             return PathPlanResult(
-                True, select_optimal_paths(candidates, reference))
+                True, select_optimal_paths(candidates, reference),
+                searchNodePaths=tuple(searchNodePaths))
 
-        if _reachable(
-                graph, goal_id, polygons, vehicle_static_info,
-                vehicle_dynamic_info, collision_pairs,
-                allow_curvature=True):
+        if safeNodePaths:
             terminal = graph.nodes[goal_id]
             terminal_reason = (
                 "REVERSE_POINT" if "R" in terminal.roles
@@ -291,7 +292,9 @@ def plan_spatial_path(
                 vehicle_static_info, vehicle_dynamic_info,
                 terminal_reason=terminal_reason,
             )
-            return PathPlanResult(True, [fallback])
+            return PathPlanResult(
+                True, [fallback],
+                searchNodePaths=tuple(searchNodePaths))
 
     ordered_stops = sorted(
         graph.stops,
@@ -305,10 +308,11 @@ def plan_spatial_path(
         ),
     )
     for stop_id in ordered_stops:
-        candidates, _, _ = _strict_candidates(
+        candidates, safeNodePaths, _, _ = _strict_candidates(
             graph, stop_id, reference, polygons,
             vehicle_static_info, vehicle_dynamic_info,
         )
+        searchNodePaths.extend(safeNodePaths)
         if candidates:
             candidates = [
                 PathCandidate(
@@ -318,9 +322,11 @@ def plan_spatial_path(
                 for item in candidates
             ]
             return PathPlanResult(
-                True, select_optimal_paths(candidates, reference))
-    return PathPlanResult(False, failureReason="NO_SPATIAL_PATH")
-
+                True, select_optimal_paths(candidates, reference),
+                searchNodePaths=tuple(searchNodePaths))
+    return PathPlanResult(
+        False, failureReason="NO_SPATIAL_PATH",
+        searchNodePaths=tuple(searchNodePaths))
 
 def select_optimal_paths(candidates, reference_line):
     """???????????path?????????????????"""
@@ -504,12 +510,25 @@ def _build_graph(
     # 起点先接入当前所在可行域线。这样正常直行沿零换线代价向前传播，
     # 不会为了抵达第一个P点而枚举全部跨线Hermite边。
     current_start_s = current_projections[current_line]["s"]
+    current_junction_end_s = None
+    for segment in line_lane_segments[current_line]:
+        if (segment.isJunction
+                and segment.startS - 1e-6 <= current_start_s
+                < segment.endS - 1e-6):
+            current_junction_end_s = float(segment.endS)
+            break
+
     for target_id in line_nodes[current_line]:
         target = nodes[target_id]
         target_s = target.lineS[current_line]
         if target_s <= current_start_s + 1e-6:
             continue
-        if target.progress > PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE:
+        is_current_junction_exit = (
+            current_junction_end_s is not None
+            and abs(target_s - current_junction_end_s) <= 1e-6
+        )
+        if (target.progress > PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE
+                and not is_current_junction_exit):
             break
         if interval_crossed(
                 blocked[current_line], current_start_s, target_s):
@@ -722,12 +741,17 @@ def _strict_candidates(
     collision_pairs = set()
     curvature_pairs = set()
     accepted = {}
+    safe_node_paths = {}
     for _ in range(PATH_MAX_GRAPH_ITERATIONS):
         paths = _search(
-            graph, target_id, collision_pairs, curvature_pairs,
-            allow_curvature=False)
+            graph, target_id, collision_pairs, curvature_pairs)
         if not paths:
-            return [], collision_pairs, curvature_pairs
+            return (
+                list(accepted.values()),
+                tuple(safe_node_paths.values()),
+                collision_pairs,
+                curvature_pairs,
+            )
         valid = []
         changed = False
         for edge_ids, signature in paths:
@@ -737,14 +761,14 @@ def _strict_candidates(
                 previous_state = edge.state
                 _validate_edge(
                     graph, edge, polygons, static_info, dynamic_info)
-                if edge.state == "COLLISION_INVALID" or (
-                        edge.state == "CURVATURE_INVALID"):
+                if edge.state in ("COLLISION_INVALID", "CURVATURE_INVALID"):
                     edge_invalid = True
                     if previous_state == "UNKNOWN":
                         changed = True
                     break
             if edge_invalid:
                 continue
+
             path = _join_edges(graph, edge_ids)
             collision = path_vehicle_intersects(
                 path, polygons,
@@ -762,6 +786,11 @@ def _strict_candidates(
                     collision_pairs.add(pair)
                     changed = True
                 continue
+
+            if (signature not in safe_node_paths
+                    and len(safe_node_paths) < PATH_MAX_CANDIDATES):
+                safe_node_paths[signature] = _edge_node_path(graph, edge_ids)
+
             maximum = float(np.max(path_curvatures(
                 path, PATH_CURVATURE_WINDOW))) if len(path) > 2 else 0.0
             limit = (
@@ -776,6 +805,7 @@ def _strict_candidates(
                     curvature_pairs.add(pair)
                     changed = True
                 continue
+
             sampled = resample_polyline(path, PATH_OUTPUT_POINT_SPACING)
             scored_curvature = float(np.max(path_curvatures(
                 sampled, PATH_CURVATURE_WINDOW
@@ -783,20 +813,22 @@ def _strict_candidates(
             valid.append(PathCandidate(
                 sampled, 0.0, signature, scored_curvature,
             ))
+
         for candidate in valid:
             accepted.setdefault(candidate.lineSequence, candidate)
         if len(accepted) >= PATH_MAX_CANDIDATES:
-            return list(accepted.values()), collision_pairs, curvature_pairs
-        if valid and not changed:
-            return list(accepted.values()), collision_pairs, curvature_pairs
+            break
         if not changed:
-            return list(accepted.values()), collision_pairs, curvature_pairs
-    return list(accepted.values()), collision_pairs, curvature_pairs
+            break
 
+    return (
+        list(accepted.values()),
+        tuple(safe_node_paths.values()),
+        collision_pairs,
+        curvature_pairs,
+    )
 
-def _search(
-        graph, target_id, collision_pairs, curvature_pairs,
-        allow_curvature):
+def _search(graph, target_id, collision_pairs, curvature_pairs):
     queue = [(
         0.0, 0.0, 0, "S", None,
         (graph.currentLine,), tuple(),
@@ -823,15 +855,10 @@ def _search(
             continue
         for edge_id in graph.adjacency.get(node_id, ()):
             edge = graph.edges[edge_id]
-            if edge.state == "COLLISION_INVALID":
-                continue
-            if (not allow_curvature
-                    and edge.state == "CURVATURE_INVALID"):
+            if edge.state in ("COLLISION_INVALID", "CURVATURE_INVALID"):
                 continue
             pair = (previous_edge, edge_id)
-            if pair in collision_pairs:
-                continue
-            if not allow_curvature and pair in curvature_pairs:
+            if pair in collision_pairs or pair in curvature_pairs:
                 continue
             new_signature = signature
             if not new_signature or new_signature[-1] != edge.targetLine:
@@ -862,32 +889,16 @@ def _search(
             results.items(), key=lambda item: item[1][0])
     ]
 
+def _edge_node_path(graph, edge_ids):
+    if not edge_ids:
+        return np.empty((0, 2), dtype=float)
+    nodeIds = [graph.edges[edge_ids[0]].source]
+    nodeIds.extend(graph.edges[edgeId].target for edgeId in edge_ids)
+    return np.asarray([
+        graph.nodes[nodeId].point for nodeId in nodeIds
+    ], dtype=float)
 
-def _reachable(
-        graph, target_id, polygons, static_info, dynamic_info,
-        collision_pairs, allow_curvature):
-    stack = [("S", None)]
-    visited = set()
-    while stack:
-        node_id, previous_edge = stack.pop()
-        if node_id == target_id:
-            return True
-        state = (node_id, previous_edge)
-        if state in visited:
-            continue
-        visited.add(state)
-        for edge_id in graph.adjacency.get(node_id, ()):
-            if (previous_edge, edge_id) in collision_pairs:
-                continue
-            edge = graph.edges[edge_id]
-            _validate_edge(
-                graph, edge, polygons, static_info, dynamic_info)
-            if edge.state == "COLLISION_INVALID":
-                continue
-            if not allow_curvature and edge.state == "CURVATURE_INVALID":
-                continue
-            stack.append((edge.target, edge_id))
-    return False
+
 
 
 def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
