@@ -279,7 +279,27 @@ class VehicleSimulator:
             (waypointPoints, displaySpeeds))
 
         if len(waypointPoints) == 1:
-            self._stop_at_current_position()
+            executionPath = clean_xy(future_path)
+            if len(executionPath) < 2:
+                self._stop_at_current_position()
+                return
+            targetProgress = float(project_points_to_polyline(
+                waypointPoints, executionPath)['s'][0])
+            if targetProgress <= 1e-6:
+                self._stop_at_current_position()
+                return
+            previousSpeed = (
+                float(np.max(self.segmentSpeeds))
+                if len(self.segmentSpeeds) else 0.0
+            )
+            approachSpeed = max(0.0, self.speed, previousSpeed)
+            if approachSpeed <= 1e-9:
+                self._stop_at_current_position()
+                return
+            self.executionPath = executionPath
+            self.executionArc = arc_lengths(executionPath)
+            self.speedEndS = np.asarray([targetProgress], dtype=float)
+            self.segmentSpeeds = np.asarray([approachSpeed], dtype=float)
             return
 
         self.executionPath = clean_xy(future_path)
