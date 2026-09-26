@@ -71,12 +71,26 @@ def calculate_block_priority(
     calculate_optimized_priorities(
         graph, unresolved, paths, vehicle_static_info,
         vehicle_dynamic_info, history)
+    retained_history = _retain_history_edges(graph, history)
     order = _topological_order(graph, system_priorities, vehicle_static_info)
     priority_edges = set(physical_edges)
     priority_edges.update(_materialize_conflict_edges(graph, conflicts))
+    priority_edges.update(retained_history)
     return PriorityDecision(
         members, tuple(order), tuple(sorted(priority_edges)),
         tuple(sorted(physical_edges)), tuple(conflicts))
+
+
+def _retain_history_edges(graph, historical_priority_edges):
+    """同一协同块内继续保留不与本帧约束冲突、且不会成环的历史边。"""
+    retained = set()
+    for high, low in sorted(historical_priority_edges):
+        if _reachable(graph, low, high):
+            continue
+        if not _reachable(graph, high, low):
+            _try_add_edge(graph, high, low)
+        retained.add((high, low))
+    return retained
 
 
 def add_physical_priorities(graph, physical_priorities):

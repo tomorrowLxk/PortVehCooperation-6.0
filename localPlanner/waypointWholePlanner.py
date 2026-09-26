@@ -107,6 +107,10 @@ def plan_block_waypoint_whole(
         vehicle_static_info, vehicle_dynamic_info):
     """按一个协同块的完整优先级由高到低生成waypointWhole。"""
     accepted = {}
+    predecessors = _priority_predecessors(
+        priority_decision.members,
+        priority_decision.priorityEdges,
+    )
 
     for vehicle_id in priority_decision.priorityOrder:
         prepared = _prepare_motion(
@@ -135,7 +139,11 @@ def plan_block_waypoint_whole(
             vehicle_id,
             prepared,
             free_whole,
-            accepted,
+            {
+                high_id: accepted[high_id]
+                for high_id in predecessors[vehicle_id]
+                if high_id in accepted
+            },
             vehicle_static_info,
             vehicle_dynamic_info,
         )
@@ -147,6 +155,28 @@ def plan_block_waypoint_whole(
         )
 
     return accepted
+
+
+def _priority_predecessors(members, priority_edges):
+    """返回每辆车在优先级图中的全部上游车辆；无优先级关系的车辆互不可见。"""
+    reverse_graph = {str(vehicle_id): set() for vehicle_id in members}
+    for high, low in priority_edges:
+        high, low = str(high), str(low)
+        if high in reverse_graph and low in reverse_graph:
+            reverse_graph[low].add(high)
+
+    output = {}
+    for vehicle_id in reverse_graph:
+        stack = list(reverse_graph[vehicle_id])
+        predecessors = set()
+        while stack:
+            high = stack.pop()
+            if high in predecessors:
+                continue
+            predecessors.add(high)
+            stack.extend(reverse_graph[high])
+        output[vehicle_id] = predecessors
+    return output
 
 
 def align_old_waypoint_whole(old_whole, current_position):
