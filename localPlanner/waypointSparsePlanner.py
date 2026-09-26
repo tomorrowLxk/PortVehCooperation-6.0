@@ -82,8 +82,15 @@ def _select_sparse_indices(future_path_s):
     last = len(values) - 1
     total = float(values[last] - values[first])
 
-    # 首末两个有效点都无法满足一般间距时，四点全部合并到末点。
+    # 一般间距不足时，仅在实际候选点中确实存在第二个合法点时保留两点。
     if total < WAYPOINT_SPARSE_MIN_SPACING - 1e-9:
+        hasSecondPoint = any(
+            values[index] - values[first]
+            > WAYPOINT_SPARSE_FIRST_SECOND_MIN_SPACING
+            for index in range(first + 1, last + 1)
+        )
+        if hasSecondPoint:
+            return np.asarray([first, last, last, last], dtype=int)
         return np.full(WAYPOINT_SPARSE_COUNT, last, dtype=int)
 
     second_target = values[first] + total / 3.0
