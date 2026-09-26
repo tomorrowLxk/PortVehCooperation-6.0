@@ -6,6 +6,8 @@ from parameters import (
     DEFAULT_AGV_STATIC_INFO,
     DEFAULT_NON_AGV_STATIC_INFO,
     VEHICLE_CACHE_MAX_MISSING_FRAMES,
+    VEHICLE_LATERAL_UNCERTAINTY_SCALE,
+    VEHICLE_LONGITUDINAL_UNCERTAINTY_SCALE,
 )
 
 
@@ -25,8 +27,12 @@ def update_vehicle_dynamic_cache(all_vehicle_states, previous_cache):
                 float("nan") if y is None else float(y),
             ]),
             "posAccuracy": _field(state, "posAccuracy"),
-            "lateralUncertainty": 0.2 * accuracy_level,
-            "longitudinalUncertainty": 0.5 * accuracy_level,
+            "lateralUncertainty": (
+                VEHICLE_LATERAL_UNCERTAINTY_SCALE * accuracy_level
+            ),
+            "longitudinalUncertainty": (
+                VEHICLE_LONGITUDINAL_UNCERTAINTY_SCALE * accuracy_level
+            ),
             "speed": 0.0 if raw_speed == 8191 else max(0.0, float(raw_speed) * 0.02),
             "heading": float(_field(state, "heading", 0.0)),
             "direction": int(_field(state, "direction", 1)),

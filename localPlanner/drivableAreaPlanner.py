@@ -173,7 +173,7 @@ class DrivableAreaPlanner:
     def _find_bridge_lanes(route_stages, connector_dict, forbidden):
         """搜索连接较早和较晚长路径阶段的有限深度纵向车道。"""
         if FEASIBLE_DOMAIN_SEARCH_DEPTH <= 0:
-            return set()
+            return set(), {}
 
         base_lanes = set().union(*route_stages)
         stage_index = {}

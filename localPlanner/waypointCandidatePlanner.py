@@ -112,6 +112,8 @@ def match_current_junction_lane(
     candidates = []
 
     for lane_id in junction_lane_ids:
+        if lane_id not in centerline_dict:
+            continue
         lane = clean_xy(centerline_dict[lane_id])
         lane_length = polyline_length(lane)
         projection = project_to_polyline(position, lane)

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from shortCache.vehInfo import update_vehicle_dynamic_cache, update_vehicle_static_cache
-from shortCache.vehObstacle import remaining_path_length
 from shortCache.requestInfo import build_request_temporary_info
 
 from parameters import (
@@ -113,6 +112,8 @@ class PlanningEngine:
 
         # reversePointCaches以车辆ID为key，只保存当前调箱门任务的倒车切换点xy。
         self.reversePointCaches: Dict[str, Any] = {}
+        # 完整调箱门任务车辆集合；到达R点后仍保留，直到任务变化或车辆驶出。
+        self.dxmTaskVehicleIds: set[str] = set()
         # AV/HV任务身份与R点是否已通过无关；只有新commandId才开始新任务。
         self.vehicleTaskCaches: Dict[str, Dict[str, Any]] = {}
         # HV只沿route定位，单独维护弧长进度，不实例化可行域规划器。
@@ -141,6 +142,8 @@ class PlanningEngine:
                 previousTask is None
                 or previousTask.get('commandId') != commandId
         )
+        if taskChanged:
+            self.dxmTaskVehicleIds.discard(vehicleId)
 
         # 同一个调箱门任务仍处于保护区时，冻结短路径内部上下文。
         if (isAgv and planner is not None and not taskChanged
@@ -305,6 +308,52 @@ class PlanningEngine:
             'commandId': commandId,
             'allowReverse': allowReverse,
         }
+        if allowReverse:
+            self.dxmTaskVehicleIds.add(vehicleId)
+        else:
+            self.dxmTaskVehicleIds.discard(vehicleId)
+
+    def removeExitedVehicleCaches(self):
+        """统一删除已连续缺失并从动静态缓存中移除的车辆全部历史状态。"""
+        retainedVehicleIds = (
+            set(self.vehicleStaticInfoCaches)
+            & set(self.vehicleDynamicInfoCaches)
+        )
+        vehicleCaches = (
+            self.drivableAreaPlannerCaches,
+            self.vehicleLaneIDCaches,
+            self.vehicleRouteCaches,
+            self.vehicleForbiddenLaneIDCaches,
+            self.vehicleBasePathCaches,
+            self.vehicleBaseWaypointCandidateCaches,
+            self.vehicleBasePathLaneIDCaches,
+            self.vehicleJunctionEntranceCaches,
+            self.vehicleWaypointWholeCaches,
+            self.vehicleWaypointSparseCaches,
+            self.vehicleObstacleCaches,
+            self.reversePointCaches,
+            self.vehicleTaskCaches,
+            self.vehicleRouteProgressCaches,
+        )
+        for cache in vehicleCaches:
+            for vehicleId in tuple(cache):
+                if vehicleId not in retainedVehicleIds:
+                    cache.pop(vehicleId, None)
+
+        self.dxmTaskVehicleIds.intersection_update(retainedVehicleIds)
+        priorityNodes = {
+            vehicleId: vehicleType
+            for vehicleId, vehicleType in self.priorityGraphCache.get(
+                'nodes', {}).items()
+            if vehicleId in retainedVehicleIds
+        }
+        self.priorityGraphCache = {
+            'nodes': priorityNodes,
+            'edges': {
+                edge for edge in self.priorityGraphCache.get('edges', ())
+                if edge[0] in priorityNodes and edge[1] in priorityNodes
+            },
+        }
 
     def shouldReplanAgvBasePath(
             self, vehicleId, dynamicInfo, obstaclePolygons):
@@ -358,8 +407,10 @@ class PlanningEngine:
 
         return False
 
-    def updateVehicleObstacleCaches(self, requests, agvFuturePaths):
-        """在空间规划完成后，按本帧BSM维护全部车辆的死车状态。"""
+    def updateVehicleObstacleCaches(
+            self, requests, effectiveWaypointWholeResults,
+            agvExecutableShortPathVehicleIds):
+        """在速度规划完成后，按实际采用的waypointWhole维护全部车辆死车状态。"""
         requestMap = {
             str(request.get('deviceId')): request for request in requests
         }
@@ -418,41 +469,40 @@ class PlanningEngine:
             # 2. 有response时实时判断规划失败；无response时只继承上一帧规划失败。
             if reason is None:
                 if response is not None and not response.get('success', False):
-                    failureReason = str(
-                        response.get('message')
-                        or response.get('code')
-                        or '规划失败'
-                    )
-                    reason = (
-                        failureReason
-                        if failureReason.startswith('失败：')
-                        else f'失败：{failureReason}'
-                    )
+                    # 长路径失败但历史Planner仍成功产生可执行短路径时，
+                    # response继续保持失败；死车状态则由实际执行情况判断。
+                    if not (
+                            isAgv
+                            and vehicleId
+                            in agvExecutableShortPathVehicleIds):
+                        failureReason = str(
+                            response.get('message')
+                            or response.get('code')
+                            or '规划失败'
+                        )
+                        reason = (
+                            failureReason
+                            if failureReason.startswith('失败：')
+                            else f'失败：{failureReason}'
+                        )
                 elif response is None:
                     oldReason = str(old.get('reason') or '')
                     if oldReason.startswith('失败：'):
                         reason = oldReason
 
-            # 3. 前面均未命中时，仅AGV根据执行情况判断其他死车。
+            # 3. 前面均未命中时，仅AGV根据实际采用的速度规划结果判断其他死车。
             if (reason is None and isAgv
                     and float(dynamicInfo.get('speed', 0.0))
                     < VEHICLE_STOP_SPEED_THRESHOLD):
-                historicalPath = self.vehicleBasePathCaches.get(vehicleId)
-                historicalPathCanMove = (
-                        remaining_path_length(historicalPath, position)
-                        > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
+                waypointWhole = effectiveWaypointWholeResults.get(vehicleId)
+                shouldMove = (
+                    waypointWhole is not None
+                    and len(waypointWhole.motionS) > 0
+                    and float(waypointWhole.motionS[-1])
+                    > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
                 )
-                if historicalPathCanMove:
-                    if request is None:
-                        reason = '其他'
-                    else:
-                        currentPaths = agvFuturePaths.get(vehicleId, ())
-                        if any(
-                                remaining_path_length(path, position)
-                                > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
-                                for path in currentPaths
-                        ):
-                            reason = '其他'
+                if shouldMove:
+                    reason = '其他'
 
             if reason is None:
                 updated[vehicleId] = {
@@ -517,6 +567,7 @@ class PlanningEngine:
         # todo. 二、更新车辆缓存
         self.vehicleStaticInfoCaches = update_vehicle_static_cache(allVehicleStaticInfo, self.vehicleStaticInfoCaches)
         self.vehicleDynamicInfoCaches = update_vehicle_dynamic_cache(allVehicleStates, self.vehicleDynamicInfoCaches)
+        self.removeExitedVehicleCaches()
 
         # todo. 三、根据request更新临时信息
         systemPriorities, vehiclePlanningMaxSpeeds = build_request_temporary_info(requests, self.vehicleStaticInfoCaches)
@@ -538,10 +589,21 @@ class PlanningEngine:
                 junctionLaneIds=junctionLaneIds,
             )
 
+        # 空间规划前，统一更新本帧全部BSM中已有Planner的AGV位置匹配。
+        for rawVehicleId in allVehicleStates:
+            vehicleId = str(rawVehicleId)
+            planner = self.drivableAreaPlannerCaches.get(vehicleId)
+            if planner is not None:
+                planner.update_position_match(
+                    self.vehicleDynamicInfoCaches[vehicleId],
+                    self.reversePointCaches.get(vehicleId),
+                )
+
         # todo. 五、为必要车辆生成basePath，并更新vehicleBasePathCaches。
         # AGV按request规划候选；HV按本帧全部BSM生成固定长度basePath。
         AGV_basePathCandidates = {}  # 仅用于调试，vehicleId -> List[Nx3]
         spatialDrivableLines = {}  # 仅用于调试/可视化
+        agvExecutableShortPathVehicleIds = set()
 
         all_obstacle_polygons = build_obstacle_polygons(
             obstacle_map=obstacleMap,
@@ -559,13 +621,8 @@ class PlanningEngine:
             staticInfo = self.vehicleStaticInfoCaches[vehicleId]
             vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
             if not self.shouldReplanAgvBasePath(vehicleId, dynamicInfo, vehi_obstacle_polygons):
-                planner = self.drivableAreaPlannerCaches.get(vehicleId)
-                if planner is not None:
-                    planner.update_position_match(
-                        dynamicInfo,
-                        self.reversePointCaches.get(vehicleId),
-                    )
                 AGV_basePathCandidates[vehicleId] = [self.vehicleBasePathCaches[vehicleId].copy()]
+                agvExecutableShortPathVehicleIds.add(vehicleId)
                 continue
 
             self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
@@ -587,6 +644,8 @@ class PlanningEngine:
                     failureReason,
                     f'短路径空间规划失败：{failureReason}',
                 )
+            else:
+                agvExecutableShortPathVehicleIds.add(vehicleId)
             AGV_basePathCandidates[vehicleId] = agv_spatial_result.candidatePaths
             spatialDrivableLines[vehicleId] = agv_spatial_result.drivableLines
             if agv_spatial_result.candidatePaths:
@@ -692,7 +751,7 @@ class PlanningEngine:
             currentJunctionLaneId = match_current_junction_lane(
                 dynamicInfo['position'],
                 dynamicInfo['heading'],
-                CenterlineDict,
+                signalCenterlines,
                 junctionLaneIds,
             )
             if currentJunctionLaneId is None:
@@ -701,7 +760,7 @@ class PlanningEngine:
                 self.vehicleJunctionEntranceCaches[vehicleId] = {
                     'junctionLaneId': currentJunctionLaneId,
                     'entrancePoint': np.asarray(
-                        CenterlineDict[currentJunctionLaneId],
+                        signalCenterlines[currentJunctionLaneId],
                         dtype=float,
                     )[0, :2].copy(),
                 }
@@ -715,18 +774,6 @@ class PlanningEngine:
                     junction_lane_ids=junctionLaneIds,
                 )
             )
-
-        agvFuturePathsForObstacleCheck = {
-            vehicleId: [path]
-            for vehicleId, path in future_path.items()
-            if self.vehicleStaticInfoCaches[vehicleId].get('vehicleType') == 'AGV'
-        }
-
-        # todo. 七、根据本帧BSM、response、历史path和当前空间候选确定死车。
-        self.updateVehicleObstacleCaches(
-            requests=requests,
-            agvFuturePaths=agvFuturePathsForObstacleCheck,
-        )
 
         # todo 八、仅根据futurePath的空间接近关系生成协同连通块，保留单车块。
         cooperationBlocks = group_by_future_paths(
@@ -750,7 +797,7 @@ class PlanningEngine:
         historicalPriorityEdges = set(
             self.priorityGraphCache.get('edges', ()))
         newPriorityEdges = set()
-        dxmVehicleIds = set(self.reversePointCaches)
+        dxmVehicleIds = set(self.dxmTaskVehicleIds)
 
         for cooperationBlock in cooperationBlocks:
             priorityDecision = calculate_block_priority(
@@ -814,12 +861,14 @@ class PlanningEngine:
 
         # todo. 十二、比较新旧waypointWhole，仅为确实变化的AGV更新waypointSparse。
         waypointSparseResults = {}
+        effectiveWaypointWholeResults = {}
         for vehicleId, newWaypointWhole in newWaypointWholeResults.items():
             if self.vehicleStaticInfoCaches[vehicleId].get('vehicleType') != 'AGV':
                 waypointSparseResults[vehicleId] = build_hv_waypoint_sparse(
                     newWaypointWhole,
                     self.vehicleDynamicInfoCaches[vehicleId],
                 )
+                effectiveWaypointWholeResults[vehicleId] = newWaypointWhole
                 continue
 
             oldWaypointWhole = self.vehicleWaypointWholeCaches.get(vehicleId)
@@ -841,6 +890,7 @@ class PlanningEngine:
                 waypointSparseResults[vehicleId] = (
                     self.vehicleWaypointSparseCaches[vehicleId].copy()
                 )
+                effectiveWaypointWholeResults[vehicleId] = alignedOldWaypointWhole
                 continue
 
             waypointSparse = build_waypoint_sparse(
@@ -854,11 +904,22 @@ class PlanningEngine:
             self.vehicleWaypointWholeCaches[vehicleId] = newWaypointWhole
             self.vehicleWaypointSparseCaches[vehicleId] = waypointSparse.copy()
             self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
+            effectiveWaypointWholeResults[vehicleId] = newWaypointWhole
 
         self.lastPlanningDiagnostics['waypointSparse'] = {
             vehicleId: value.copy()
             for vehicleId, value in waypointSparseResults.items()
         }
+
+        # todo. 七（依赖十一、十二阶段结果，延后执行）：根据实际采用的
+        # waypointWhole更新死车，协同主动停车不会被误判。
+        self.updateVehicleObstacleCaches(
+            requests=requests,
+            effectiveWaypointWholeResults=effectiveWaypointWholeResults,
+            agvExecutableShortPathVehicleIds=(
+                agvExecutableShortPathVehicleIds
+            ),
+        )
 
         # todo. 十三、按request顺序向长路径response填充短路径结果。
         for requestIndex, request in enumerate(requests):

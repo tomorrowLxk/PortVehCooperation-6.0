@@ -2,6 +2,8 @@
 
 
 VEHICLE_CACHE_MAX_MISSING_FRAMES = 3  # 车辆连续缺失达到该帧数后，从动静态信息缓存中删除
+VEHICLE_LATERAL_UNCERTAINTY_SCALE = 0.0  # 每级posAccuracy对应的横向定位不确定性，单位m，正式映射明确前暂设为0
+VEHICLE_LONGITUDINAL_UNCERTAINTY_SCALE = 0.0  # 每级posAccuracy对应的纵向定位不确定性，单位m，正式映射明确前暂设为0
 VEHICLE_OBSTACLE_CONFIRM_FRAMES = 3  # 车辆连续“短路径要求行驶但实际静止”达到该帧数后，视为静态障碍物
 VEHICLE_OBSTACLE_MAX_FRAMES = 300  # 死车原因连续帧数的最大缓存值
 VEHICLE_STOP_SPEED_THRESHOLD = 0.5  # 车辆速度低于该值时，开始怀疑车辆处于停车状态，单位m/s

@@ -174,7 +174,13 @@ def _slice_lane_ids(path, lane_ids, start_s, end_s):
         )
         return labels[index] if ratio <= 0.5 else labels[index + 1]
 
-    output = [label_at(start)]
+    # 裁剪新增的当前位置点固定继承下游相邻点的laneId，避免车辆压过
+    # 停车线后仍因起点保留进口道laneId而重复响应已经驶过的信号灯。
+    start_index = min(
+        int(np.searchsorted(arc, start, side='right') - 1),
+        len(values) - 2,
+    )
+    output = [labels[start_index + 1]]
     output.extend(
         labels[index]
         for index in range(1, len(values) - 1)

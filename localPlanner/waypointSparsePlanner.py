@@ -13,7 +13,7 @@ from parameters import (
 def build_waypoint_sparse(
         waypoint_whole, dynamic_info,
         junction_entrance=None, centerline_dict=None):
-    """返回四个[x, y, heading, speed]，运动点均来自waypointWhole。"""
+    """返回四个[x, y, heading, speed, arrivalTime]。"""
     if len(waypoint_whole.points) == 1:
         return _stationary_sparse(
             waypoint_whole,
@@ -31,6 +31,7 @@ def build_waypoint_sparse(
             waypoint_whole.points[index, 1],
             heading_at_s(waypoint_whole.futurePath, path_s),
             waypoint_whole.pointSpeeds[index],
+            waypoint_whole.arrivalTimes[index],
         ])
     return np.asarray(rows, dtype=float)
 
@@ -42,9 +43,9 @@ def build_hv_waypoint_sparse(waypoint_whole, dynamic_info):
     if total <= 1e-9 or speed <= 1e-9:
         point = np.asarray(dynamic_info['position'], dtype=float)[:2]
         row = np.asarray([
-            point[0], point[1], float(dynamic_info['heading']), 0.0
+            point[0], point[1], float(dynamic_info['heading']), 0.0, 0.0
         ])
-        return np.repeat(row.reshape(1, 4), WAYPOINT_SPARSE_COUNT, axis=0)
+        return np.repeat(row.reshape(1, 5), WAYPOINT_SPARSE_COUNT, axis=0)
 
     rows = []
     for path_s in np.linspace(0.0, total, WAYPOINT_SPARSE_COUNT):
@@ -54,6 +55,7 @@ def build_hv_waypoint_sparse(waypoint_whole, dynamic_info):
             point[1],
             heading_at_s(waypoint_whole.futurePath, path_s),
             waypoint_whole.speed_at_s(path_s),
+            waypoint_whole.time_at_s(path_s),
         ])
     return np.asarray(rows, dtype=float)
 
@@ -70,8 +72,8 @@ def _stationary_sparse(
         lane_id = junction_entrance['junctionLaneId']
         heading = heading_at_s(centerline_dict[lane_id], 0.0)
 
-    row = np.asarray([point[0], point[1], heading, 0.0], dtype=float)
-    return np.repeat(row.reshape(1, 4), WAYPOINT_SPARSE_COUNT, axis=0)
+    row = np.asarray([point[0], point[1], heading, 0.0, 0.0], dtype=float)
+    return np.repeat(row.reshape(1, 5), WAYPOINT_SPARSE_COUNT, axis=0)
 
 
 def _select_sparse_indices(future_path_s):

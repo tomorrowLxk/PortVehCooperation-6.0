@@ -96,6 +96,12 @@ def build_response_path_lists(
         end = waypoint_array[index + 1]
         start_s, end_s = intervals[movable_index]
         length = max(0.0, end_s - start_s)
+        duration = float(end[4] - start[4])
+        segment_speed = (
+            length / duration
+            if np.isfinite(duration) and duration > 1e-9
+            else 0.0
+        )
         start_lane = lane_matches[index]
         end_lane = lane_matches[index + 1]
         middle_lane = lane_matches[middle_offset + movable_index]
@@ -113,7 +119,7 @@ def build_response_path_lists(
             final_destination=final_destination,
             lane_id=middle_lane,
             points=[_position(start), _position(end)],
-            speed=0.5 * (start[3] + end[3]),
+            speed=segment_speed,
             action=action,
             direction=direction,
             length=length,
@@ -318,10 +324,16 @@ def _merge_paths(short_paths):
         second_length = segment['length']
         total_length = first_length + second_length
         if total_length > 1e-9:
-            previous['speedLimit'] = (
-                previous['speedLimit'] * first_length
-                + segment['speedLimit'] * second_length
-            ) / total_length
+            first_speed = previous['speedLimit']
+            second_speed = segment['speedLimit']
+            if first_speed > 1e-9 and second_speed > 1e-9:
+                total_time = (
+                    first_length / first_speed
+                    + second_length / second_speed
+                )
+                previous['speedLimit'] = total_length / total_time
+            else:
+                previous['speedLimit'] = 0.0
         previous['points'] = [
             previous['points'][0],
             dict(segment['points'][-1]),
