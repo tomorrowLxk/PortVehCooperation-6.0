@@ -4,9 +4,8 @@ import numpy as np
 
 from localPlanner.pathGeometry import clean_xy, path_curvatures
 from parameters import (
-    PATH_CURVATURE_MIN_SPEED,
-    PATH_CURVATURE_SPEED_COEFFICIENT,
     PATH_CURVATURE_WINDOW,
+    VEHICLE_MAX_LATERAL_ACCELERATION,
 )
 
 
@@ -18,12 +17,9 @@ def build_speed_limit_path(path, maximum_speed, terminal_stop=False):
     speeds = np.full(len(points), max(0.0, float(maximum_speed)), dtype=float)
     curved = curvature > 1e-6
     if np.any(curved):
-        curve_limit = np.maximum(
-            PATH_CURVATURE_MIN_SPEED,
-            1.0 / (
-                    PATH_CURVATURE_SPEED_COEFFICIENT
-                    * np.maximum(curvature[curved], 1e-6)
-            ),
+        curve_limit = np.sqrt(
+            VEHICLE_MAX_LATERAL_ACCELERATION
+            / np.maximum(curvature[curved], 1e-6)
         )
         speeds[curved] = np.minimum(speeds[curved], curve_limit)
     if terminal_stop:

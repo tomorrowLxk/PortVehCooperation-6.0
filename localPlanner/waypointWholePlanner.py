@@ -365,14 +365,17 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
         candidate_nodes = np.asarray([0], dtype=int)
     else:
         raw[:, 2] = np.clip(raw[:, 2], 0.0, source_s[-1])
-        if raw[0, 2] <= 1e-6:
-            node_s = raw[:, 2].copy()
-            node_xy = raw[:, :2].copy()
-            candidate_nodes = np.arange(len(raw), dtype=int)
-        else:
-            node_s = np.r_[0.0, raw[:, 2]]
-            node_xy = np.vstack((path[0], raw[:, :2]))
-            candidate_nodes = np.arange(1, len(raw) + 1, dtype=int)
+        motion_end = float(raw[-1, 2])
+        node_s = np.unique(np.r_[
+            0.0,
+            source_s[source_s <= motion_end + 1e-9],
+            raw[:, 2],
+        ])
+        node_xy = np.column_stack((
+            np.interp(node_s, source_s, path[:, 0]),
+            np.interp(node_s, source_s, path[:, 1]),
+        ))
+        candidate_nodes = np.searchsorted(node_s, raw[:, 2])
 
     limits = np.interp(node_s, source_s, source_limits)
     limits = np.minimum(limits, float(static['maxSpeed']))
@@ -418,6 +421,7 @@ def _build_candidate_constraints(
     aeb_checks = []
 
     for high_id, high_whole in accepted.items():
+        high_geometry = _prepare_collision_geometry(high_whole.futurePath)
         pair_required = np.full(count, np.nan, dtype=float)
         pair_speed_caps = np.full(count, np.nan, dtype=float)
         candidate_s = prepared['candidateS']
@@ -444,6 +448,7 @@ def _build_candidate_constraints(
                 low_heading = _path_heading(prepared['futurePath'], value)
                 conflict = _first_collision_exit(
                     high_whole,
+                    high_geometry,
                     low_point,
                     low_heading,
                     static_info[high_id],
@@ -483,6 +488,7 @@ def _build_candidate_constraints(
                     pair_speed_caps[right], high_speed)
                 aeb_checks.append({
                     'highWhole': high_whole,
+                    'highGeometry': high_geometry,
                     'highStatic': static_info[high_id],
                     'highDynamic': dynamic_info[high_id],
                     'lowS': float(value),
@@ -704,7 +710,8 @@ def _first_aeb_unsafe_stop_index(
                 low_heading,
                 low_static,
                 low_dynamic,
-                aeb_gap):
+                aeb_gap,
+                check['highGeometry']):
             return int(check['stopIndex'])
     return None
 
@@ -803,7 +810,7 @@ def _build_whole(
 
 
 def _first_collision_exit(
-        high_whole, low_point, low_heading,
+        high_whole, high_geometry, low_point, low_heading,
         high_static, high_dynamic, low_static, low_dynamic,
         longitudinal_gap):
     end_s = float(high_whole.motionS[-1])
@@ -813,18 +820,20 @@ def _first_collision_exit(
             high_static, high_dynamic,
             low_point, low_heading, low_static, low_dynamic,
             longitudinal_gap,
+            high_geometry,
         )
         return (0.0, True) if collides else None
 
     spacing = max(0.1, COOPERATION_CONFLICT_SAMPLE_SPACING)
     samples = np.arange(0.0, end_s, spacing)
-    samples = np.unique(np.r_[samples, high_whole.motionS, end_s])
+    samples = np.r_[samples, end_s]
     collision = np.asarray([
         _vehicle_rectangles_overlap(
             high_whole.futurePath, value,
             high_static, high_dynamic,
             low_point, low_heading, low_static, low_dynamic,
             longitudinal_gap,
+            high_geometry,
         )
         for value in samples
     ], dtype=bool)
@@ -845,7 +854,8 @@ def _first_collision_exit(
                 high_whole.futurePath, middle,
                 high_static, high_dynamic,
                 low_point, low_heading, low_static, low_dynamic,
-                longitudinal_gap):
+                longitudinal_gap,
+                high_geometry):
             lower = middle
         else:
             upper = middle
@@ -855,9 +865,14 @@ def _first_collision_exit(
 def _vehicle_rectangles_overlap(
         high_path, high_s, high_static, high_dynamic,
         low_point, low_heading, low_static, low_dynamic,
-        longitudinal_gap):
-    high_center = point_at_s(high_path, high_s)
-    high_tangent = tangent_at_s(high_path, high_s)
+        longitudinal_gap, high_geometry=None):
+    geometry = (
+        high_geometry
+        if high_geometry is not None
+        else _prepare_collision_geometry(high_path)
+    )
+    high_center, high_tangent = _collision_state_at_s(
+        geometry, high_s)
     high_heading = math.atan2(high_tangent[1], high_tangent[0])
     high_axes = _vehicle_axes(high_heading)
     low_axes = _vehicle_axes(low_heading)
@@ -891,6 +906,27 @@ def _vehicle_rectangles_overlap(
         if center_distance > high_radius + low_radius + 1e-9:
             return False
     return True
+
+
+def _prepare_collision_geometry(path):
+    points = clean_xy(path)
+    return points, arc_lengths(points)
+
+
+def _collision_state_at_s(geometry, value):
+    points, arc = geometry
+    if len(points) < 2:
+        return points[0].copy(), np.asarray([1.0, 0.0])
+    target = float(np.clip(value, 0.0, arc[-1]))
+    index = min(
+        int(np.searchsorted(arc, target, side='right') - 1),
+        len(points) - 2,
+    )
+    segment = points[index + 1] - points[index]
+    length = float(arc[index + 1] - arc[index])
+    tangent = segment / length
+    ratio = (target - arc[index]) / length
+    return points[index] + ratio * segment, tangent
 
 
 def _vehicle_axes(heading):
