@@ -102,6 +102,19 @@ def build_response_path_lists(
             if np.isfinite(duration) and duration > 1e-9
             else 0.0
         )
+        if movable_index == 0:
+            approach_duration = float(start[4])
+            approach_length = max(0.0, start_s)
+            if (
+                    approach_length > 1e-9
+                    and np.isfinite(approach_duration)
+                    and approach_duration > 1e-9):
+                # 稀疏点不下发当前位置，首段速度仍须满足从当前位置
+                # 到第一个下发点的计划到达时间。
+                segment_speed = min(
+                    segment_speed,
+                    approach_length / approach_duration,
+                )
         start_lane = lane_matches[index]
         end_lane = lane_matches[index + 1]
         middle_lane = lane_matches[middle_offset + movable_index]
