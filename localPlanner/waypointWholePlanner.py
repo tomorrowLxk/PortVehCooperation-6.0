@@ -446,7 +446,7 @@ def _build_candidate_constraints(
             for value in sample_s:
                 low_point = point_at_s(prepared['futurePath'], value)
                 low_heading = _path_heading(prepared['futurePath'], value)
-                conflict = _first_collision_exit(
+                conflict = _last_collision_exit(
                     high_whole,
                     high_geometry,
                     low_point,
@@ -815,7 +815,7 @@ def _build_whole(
     )
 
 
-def _first_collision_exit(
+def _last_collision_exit(
         high_whole, high_geometry, low_point, low_heading,
         high_static, high_dynamic, low_static, low_dynamic,
         longitudinal_gap):
@@ -846,12 +846,10 @@ def _first_collision_exit(
     entered = np.flatnonzero(collision)
     if len(entered) == 0:
         return None
-    first = int(entered[0])
-    exits = np.flatnonzero(~collision[first + 1:])
-    if len(exits):
-        upper_index = first + 1 + int(exits[0])
-        lower = float(samples[upper_index - 1])
-        upper = float(samples[upper_index])
+    last = int(entered[-1])
+    if last < len(samples) - 1:
+        lower = float(samples[last])
+        upper = float(samples[last + 1])
     else:
         if high_whole.stopped or high_whole.terminalSpeed <= 1e-9:
             return end_s, True
