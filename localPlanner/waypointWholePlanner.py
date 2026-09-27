@@ -23,6 +23,7 @@ from parameters import (
     COOPERATION_STATIC_GAP,
     COOPERATION_STOP_SPEED_THRESHOLD,
     COOPERATION_TIME_CLEARANCE,
+    WAYPOINT_CANDIDATE_SPACING,
     WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
     WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE,
 )
@@ -78,6 +79,34 @@ class WaypointWhole:
         )
         return float(self.motionSegmentSpeeds[max(index, 0)])
 
+    def state_at_time(self, value):
+        """Return path position and interval speed at a relative time."""
+        if len(self.motionS) <= 1:
+            return float(self.motionS[0]), float(self.terminalSpeed)
+
+        target = max(0.0, float(value))
+        finite_times = np.flatnonzero(np.isfinite(self.motionTimes))
+        if len(finite_times) == 0:
+            return float(self.motionS[0]), 0.0
+        last_finite = int(finite_times[-1])
+        if target >= self.motionTimes[last_finite] - 1e-9:
+            if last_finite >= len(self.motionS) - 1:
+                return float(self.motionS[-1]), float(self.terminalSpeed)
+            if not np.isfinite(self.motionTimes[last_finite + 1]):
+                return float(self.motionS[last_finite]), 0.0
+
+        index = int(np.searchsorted(
+            self.motionTimes, target, side='right') - 1)
+        index = max(0, min(index, len(self.motionSegmentSpeeds) - 1))
+        speed = float(self.motionSegmentSpeeds[index])
+        position = float(np.clip(
+            self.motionS[index]
+            + (target - self.motionTimes[index]) * speed,
+            self.motionS[index],
+            self.motionS[index + 1],
+        ))
+        return position, speed
+
     def as_array(self):
         """调试数组列为[x, y, futurePathS, arrivalTime, pointSpeed]。"""
         if len(self.points) == 0:
@@ -128,17 +157,9 @@ def plan_block_waypoint_whole(
             )
             continue
 
-        free_whole = _build_whole(
-            prepared,
-            prepared['speedLimits'],
-            vehicle_static_info[vehicle_id],
-            vehicle_dynamic_info[vehicle_id],
-            (),
-        )
         constraints = _build_candidate_constraints(
             vehicle_id,
             prepared,
-            free_whole,
             {
                 high_id: accepted[high_id]
                 for high_id in predecessors[vehicle_id]
@@ -389,63 +410,86 @@ def _prepare_speed_path(path, maximum_speed):
 
 
 def _build_candidate_constraints(
-        low_id, prepared, free_whole, accepted,
-        static_info, dynamic_info):
+        low_id, prepared, accepted, static_info, dynamic_info):
     count = len(prepared['candidates'])
     required = np.full(count, -np.inf, dtype=float)
     speed_caps = np.full(count, np.inf, dtype=float)
     all_segments = []
+    aeb_checks = []
 
     for high_id, high_whole in accepted.items():
         pair_required = np.full(count, np.nan, dtype=float)
         pair_speed_caps = np.full(count, np.nan, dtype=float)
+        candidate_s = prepared['candidateS']
+        segment_ranges = (
+            [(0, 0)] if count == 1
+            else [(index - 1, index) for index in range(1, count)]
+        )
+        for segment_number, (left, right) in enumerate(segment_ranges):
+            start_s = float(candidate_s[left])
+            end_s = float(candidate_s[right])
+            if left == right:
+                sample_s = np.asarray([start_s])
+            else:
+                segment_count = max(
+                    1, int(math.ceil(
+                        (end_s - start_s) / WAYPOINT_CANDIDATE_SPACING)))
+                sample_s = np.linspace(
+                    start_s, end_s, segment_count + 1)
+                if segment_number > 0:
+                    sample_s = sample_s[1:]
 
-        for index, candidate in enumerate(prepared['candidates']):
-            low_heading = _path_heading(
-                prepared['futurePath'], candidate[2])
-            conflict = _first_collision_exit(
-                high_whole,
-                candidate[:2],
-                low_heading,
-                static_info[high_id],
-                dynamic_info[high_id],
-                static_info[low_id],
-                dynamic_info[low_id],
-                COOPERATION_STATIC_GAP,
-            )
-            if conflict is None:
-                continue
-
-            exit_s, blocked = conflict
-            high_speed = high_whole.speed_at_s(exit_s)
-            if not blocked:
-                low_speed = float(free_whole.pointSpeeds[index])
-                delta_v = max(0.0, low_speed - high_speed)
-                aeb_gap = (
-                    delta_v * delta_v
-                    / (2.0 * COOPERATION_EMERGENCY_DECELERATION)
-                    + COOPERATION_AEB_STATIC_GAP
+            for value in sample_s:
+                low_point = point_at_s(prepared['futurePath'], value)
+                low_heading = _path_heading(prepared['futurePath'], value)
+                conflict = _first_collision_exit(
+                    high_whole,
+                    low_point,
+                    low_heading,
+                    static_info[high_id],
+                    dynamic_info[high_id],
+                    static_info[low_id],
+                    dynamic_info[low_id],
+                    COOPERATION_STATIC_GAP,
                 )
-                if aeb_gap > COOPERATION_STATIC_GAP + 1e-9:
-                    conflict = _first_collision_exit(
-                        high_whole,
-                        candidate[:2],
-                        low_heading,
-                        static_info[high_id],
-                        dynamic_info[high_id],
-                        static_info[low_id],
-                        dynamic_info[low_id],
-                        aeb_gap,
-                    )
-                    if conflict is not None:
-                        exit_s, blocked = conflict
-                        high_speed = high_whole.speed_at_s(exit_s)
+                if conflict is None:
+                    continue
 
-            pair_required[index] = (
-                float('inf') if blocked
-                else high_whole.time_at_s(exit_s) + COOPERATION_TIME_CLEARANCE
-            )
-            pair_speed_caps[index] = high_speed
+                exit_s, blocked = conflict
+                high_speed = high_whole.speed_at_s(exit_s)
+                required_time = (
+                    float('inf') if blocked
+                    else high_whole.time_at_s(exit_s)
+                    + COOPERATION_TIME_CLEARANCE
+                )
+                if blocked or high_speed <= 1e-9:
+                    left_required = required_time
+                    right_required = required_time
+                else:
+                    left_required = max(
+                        0.0,
+                        required_time - (value - start_s) / high_speed,
+                    )
+                    right_required = (
+                        required_time + (end_s - value) / high_speed)
+
+                pair_required[left] = _maximum_optional(
+                    pair_required[left], left_required)
+                pair_required[right] = _maximum_optional(
+                    pair_required[right], right_required)
+                pair_speed_caps[left] = _minimum_optional(
+                    pair_speed_caps[left], high_speed)
+                pair_speed_caps[right] = _minimum_optional(
+                    pair_speed_caps[right], high_speed)
+                aeb_checks.append({
+                    'highWhole': high_whole,
+                    'highStatic': static_info[high_id],
+                    'highDynamic': dynamic_info[high_id],
+                    'lowS': float(value),
+                    'stopIndex': int(
+                        max(0, left - 1)
+                        if value <= start_s + 1e-9 else left),
+                })
 
         raw_mask = ~np.isnan(pair_required)
         if not np.any(raw_mask):
@@ -469,7 +513,22 @@ def _build_candidate_constraints(
         'requiredTimes': required,
         'speedCaps': speed_caps,
         'segments': tuple(segments),
+        'aebChecks': tuple(aeb_checks),
     }
+
+
+def _maximum_optional(current, value):
+    return (
+        float(value) if np.isnan(current)
+        else max(float(current), float(value))
+    )
+
+
+def _minimum_optional(current, value):
+    return (
+        float(value) if np.isnan(current)
+        else min(float(current), float(value))
+    )
 
 
 def _conflict_point_segments(mask, candidate_s):
@@ -483,12 +542,8 @@ def _conflict_point_segments(mask, candidate_s):
             ends.append(int(previous))
             starts.append(int(current))
     ends.append(int(indices[-1]))
-    count = len(mask)
-    expanded = [
-        (max(0, start - 1), min(count - 1, end + 1))
-        for start, end in zip(starts, ends)
-    ]
-    return _merge_point_segments(expanded, candidate_s)
+    return _merge_point_segments(
+        list(zip(starts, ends)), candidate_s)
 
 
 def _merge_point_segments(segments, candidate_s):
@@ -602,7 +657,56 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
         limits = selected_limits
         whole = selected
 
+    unsafe_stop_index = _first_aeb_unsafe_stop_index(
+        whole, prepared, constraints['aebChecks'], static, dynamic)
+    if unsafe_stop_index is not None:
+        return _stop_at_candidate(
+            prepared,
+            whole.motionSpeedLimits,
+            unsafe_stop_index,
+            segments,
+            static,
+            dynamic,
+        )
     return whole
+
+
+def _first_aeb_unsafe_stop_index(
+        low_whole, prepared, checks, low_static, low_dynamic):
+    for check in sorted(checks, key=lambda value: value['lowS']):
+        low_s = float(check['lowS'])
+        if low_s > low_whole.motionS[-1] + 1e-9:
+            continue
+        arrival_time = low_whole.time_at_s(low_s)
+        if not np.isfinite(arrival_time):
+            continue
+
+        high_whole = check['highWhole']
+        high_s, high_speed = high_whole.state_at_time(arrival_time)
+        low_speed = low_whole.speed_at_s(low_s)
+        delta_v = max(0.0, low_speed - high_speed)
+        aeb_gap = (
+            delta_v * delta_v
+            / (2.0 * COOPERATION_EMERGENCY_DECELERATION)
+            + COOPERATION_AEB_STATIC_GAP
+        )
+        if aeb_gap <= COOPERATION_STATIC_GAP + 1e-9:
+            continue
+
+        low_point = point_at_s(prepared['futurePath'], low_s)
+        low_heading = _path_heading(prepared['futurePath'], low_s)
+        if _vehicle_rectangles_overlap(
+                high_whole.futurePath,
+                high_s,
+                check['highStatic'],
+                check['highDynamic'],
+                low_point,
+                low_heading,
+                low_static,
+                low_dynamic,
+                aeb_gap):
+            return int(check['stopIndex'])
+    return None
 
 
 def _stop_before_constraint(
@@ -610,6 +714,14 @@ def _stop_before_constraint(
     # 候选点按顺序逐个判定：下一个点不可达时，在当前已可达候选点停车。
     # 第一个候选点即不可达时，没有更早候选点，只能在第一个点停车。
     stop_index = max(0, int(constrained_index) - 1)
+    return _stop_at_candidate(
+        prepared, limits, stop_index, segments, static, dynamic)
+
+
+def _stop_at_candidate(
+        prepared, limits, stop_index, segments, static, dynamic):
+    stop_index = max(0, min(
+        int(stop_index), len(prepared['candidates']) - 1))
     stop_node = int(prepared['candidateNodes'][stop_index])
     truncated = dict(prepared)
     truncated['candidates'] = prepared['candidates'][:stop_index + 1].copy()
