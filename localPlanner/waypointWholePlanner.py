@@ -462,10 +462,16 @@ def _build_candidate_constraints(
 
                 exit_s, blocked = conflict
                 high_speed = high_whole.speed_at_s(exit_s)
+                exit_time = high_whole.time_at_s(min(
+                    exit_s, float(high_whole.motionS[-1])))
+                if (not blocked
+                        and exit_s > high_whole.motionS[-1] + 1e-9
+                        and high_speed > 1e-9):
+                    exit_time += (
+                        exit_s - high_whole.motionS[-1]) / high_speed
                 required_time = (
                     float('inf') if blocked
-                    else high_whole.time_at_s(exit_s)
-                    + COOPERATION_TIME_CLEARANCE
+                    else exit_time + COOPERATION_TIME_CLEARANCE
                 )
                 if blocked or high_speed <= 1e-9:
                     left_required = required_time
@@ -840,12 +846,48 @@ def _first_collision_exit(
     entered = np.flatnonzero(collision)
     if len(entered) == 0:
         return None
-    last = int(entered[-1])
-    if last >= len(samples) - 1:
-        return end_s, True
-
-    lower = float(samples[last])
-    upper = float(samples[last + 1])
+    first = int(entered[0])
+    exits = np.flatnonzero(~collision[first + 1:])
+    if len(exits):
+        upper_index = first + 1 + int(exits[0])
+        lower = float(samples[upper_index - 1])
+        upper = float(samples[upper_index])
+    else:
+        if high_whole.stopped or high_whole.terminalSpeed <= 1e-9:
+            return end_s, True
+        extension = (
+            float(high_static['length'])
+            + float(low_static['length'])
+            + 2.0 * float(longitudinal_gap)
+            + 2.0 * (
+                float(high_static['width'])
+                + float(low_static['width'])
+            )
+        )
+        extended_samples = np.arange(
+            end_s + spacing,
+            end_s + extension + spacing,
+            spacing,
+        )
+        extended_collision = np.asarray([
+            _vehicle_rectangles_overlap(
+                high_whole.futurePath, value,
+                high_static, high_dynamic,
+                low_point, low_heading, low_static, low_dynamic,
+                longitudinal_gap,
+                high_geometry,
+            )
+            for value in extended_samples
+        ], dtype=bool)
+        exits = np.flatnonzero(~extended_collision)
+        if len(exits) == 0:
+            return end_s, True
+        upper_index = int(exits[0])
+        lower = (
+            end_s if upper_index == 0
+            else float(extended_samples[upper_index - 1])
+        )
+        upper = float(extended_samples[upper_index])
     for _ in range(16):
         middle = 0.5 * (lower + upper)
         if _vehicle_rectangles_overlap(
@@ -915,7 +957,12 @@ def _collision_state_at_s(geometry, value):
     points, arc = geometry
     if len(points) < 2:
         return points[0].copy(), np.asarray([1.0, 0.0])
-    target = float(np.clip(value, 0.0, arc[-1]))
+    target = max(0.0, float(value))
+    if target >= arc[-1]:
+        segment = points[-1] - points[-2]
+        length = float(arc[-1] - arc[-2])
+        tangent = segment / length
+        return points[-1] + (target - arc[-1]) * tangent, tangent
     index = min(
         int(np.searchsorted(arc, target, side='right') - 1),
         len(points) - 2,
