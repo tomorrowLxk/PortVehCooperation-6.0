@@ -62,7 +62,7 @@ PHYSICAL_FRONT_REAR_HEADING_THRESHOLD_DEG = 30.0  # 判定物理前后关系允�
 PRIORITY_CONFLICT_SAMPLE_SPACING = 2.0  # 优先级冲突入口搜索的粗采样间距，单位m
 PRIORITY_CONFLICT_UPSTREAM_DISTANCE = 2.0  # 冲突锚点相对冲突区入口的上游偏移，单位m
 HV_PREDICTION_HORIZON = 3.0  # HV按当前速度匀速预测的时间范围，单位s
-AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 2.0  # AGV接近历史第二个waypoint并触发basePath重规划的距离，单位m
+AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 20.0  # AGV距离历史第四个waypoint不超过该值时触发basePath重规划，单位m
 
 PATH_NODE_SPACING = 8.0  # 每条可行域线生成普通P节点的纵向间距，单位m
 PATH_GRAPH_START_OFFSET = 10.0  # 从车辆当前位置向前首次布置P节点的距离，单位m

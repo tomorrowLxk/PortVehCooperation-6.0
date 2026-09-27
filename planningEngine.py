@@ -397,6 +397,12 @@ class PlanningEngine:
         waypoints = self.vehicleWaypointSparseCaches.get(vehicleId)
         if waypoints is None or len(waypoints) == 0:
             return True
+        thirdWaypoint = np.asarray(waypoints[-2], dtype=float)[:2]
+        thirdWaypointProgress = project_to_polyline(
+            thirdWaypoint, basePath)['s']
+        if basePathProgress >= thirdWaypointProgress - 1e-9:
+            return True
+
         lastWaypoint = np.asarray(waypoints[-1], dtype=float)[:2]
         lastWaypointProgress = project_to_polyline(
             lastWaypoint, basePath)['s']
