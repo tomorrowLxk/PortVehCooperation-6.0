@@ -582,6 +582,7 @@ class DrivableAreaPlanner:
                             centerline_dict, route_lane_ids, route):
         "计算每个route阶段中各车道真正可使用的纵向区间。"
         removed = set()
+        all_lanes = set(connector_dict)
 
         def lateral_distance(lane, targets, stage):
             queue = deque([(lane, 0)])
@@ -606,6 +607,13 @@ class DrivableAreaPlanner:
                 for index, stage in enumerate(route_stages)
             ]
 
+            def lateral_closure(lanes, stage):
+                return self._expand_lateral_lanes(
+                    lanes,
+                    connector_dict,
+                    all_lanes - stage,
+                ) & stage
+
             backward = [set() for _ in active]
             backward[-1] = {
                 min(
@@ -616,10 +624,13 @@ class DrivableAreaPlanner:
                 )
             }
             for index in range(len(active) - 2, -1, -1):
+                next_reachable = lateral_closure(
+                    backward[index + 1], active[index + 1]
+                )
                 backward[index] = {
                     lane for lane in active[index]
                     if any(
-                        successor in backward[index + 1]
+                        successor in next_reachable
                         for successor in connector_dict[lane]['successor']
                     )
                 }
@@ -628,7 +639,12 @@ class DrivableAreaPlanner:
             if route_lane_ids[0] in active[0]:
                 forward[0].add(route_lane_ids[0])
             for index in range(1, len(active)):
-                previous_core = forward[index - 1] & backward[index - 1]
+                previous_reachable = lateral_closure(
+                    forward[index - 1], active[index - 1]
+                )
+                previous_core = (
+                    previous_reachable & backward[index - 1]
+                )
                 forward[index] = {
                     lane for lane in active[index]
                     if any(
