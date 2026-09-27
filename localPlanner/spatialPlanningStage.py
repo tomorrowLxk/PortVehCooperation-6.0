@@ -161,7 +161,8 @@ def plan_agv_spatial(
             reversePointReached=reached,
         )
 
-    future_path, stop_at_route_end = _build_agv_future_path(position, drivable_area_planner, active_reverse_point)
+    reference_line, stop_at_route_end = _build_agv_reference_line(
+        position, drivable_area_planner, active_reverse_point)
     if not drivable_lines:
         reason = "NO_DRIVABLE_LINE"
         return VehicleSpatialResult(
@@ -176,7 +177,7 @@ def plan_agv_spatial(
             drivable_lines=drivable_lines,
             current_position=position,
             current_heading=heading,
-            reference_line=future_path,
+            reference_line=reference_line,
             polygons=polygons,
             vehicle_static_info=static_info,
             vehicle_dynamic_info=dynamic_info,
@@ -223,7 +224,7 @@ def plan_agv_spatial(
     )
 
 
-def _build_agv_future_path(position, planner, reverse_point):
+def _build_agv_reference_line(position, planner, reverse_point):
     route = clean_xy(planner.referLine)
     route_length = polyline_length(route)
     start_s = float(planner.lastRouteS)
@@ -244,17 +245,16 @@ def _build_agv_future_path(position, planner, reverse_point):
             end_s = min(float(stage_end_s), phase_end_s)
         break
 
-    future = slice_polyline(route, start_s, end_s)
-    if len(future) == 0:
-        future = position.reshape(1, 2)
-    elif np.linalg.norm(future[0] - position) > 1e-6:
-        future = np.vstack((position, future))
-    future = resample_polyline(future, FUTURE_PATH_POINT_SPACING)
+    reference = slice_polyline(route, start_s, end_s)
+    if len(reference) == 0:
+        reference = position.reshape(1, 2)
+    reference = resample_polyline(
+        reference, FUTURE_PATH_POINT_SPACING)
     stop_at_route_end = (
             reverse_point is None
             and end_s >= route_length - 1e-6
     )
-    return future, stop_at_route_end
+    return reference, stop_at_route_end
 
 
 def _build_hv_base_path(
