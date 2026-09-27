@@ -1,7 +1,4 @@
-import pickle
-
 import numpy as np
-from pathlib import Path
 from typing import Any, Dict, List
 
 from shortCache.vehInfo import update_vehicle_dynamic_cache, update_vehicle_static_cache
@@ -37,6 +34,7 @@ from localPlanner.spatialPlanningStage import (
 from localPlanner.pathCollision import path_vehicle_intersects
 from localPlanner.responsePlanner import build_response_path_lists
 from localPlanner.pathGeometry import (
+    clean_xy,
     polyline_length,
     project_to_polyline,
     slice_polyline,
@@ -62,23 +60,17 @@ from localPlanner.waypointSparsePlanner import (
 
 
 class PlanningEngine:
-    def __init__(self) -> None:
-        # 占位的，模拟真实系统的地图数据
-        projectRoot = Path(__file__).resolve().parent
-        staticMapDir = projectRoot / "staticMap"
-        centerlineFile = staticMapDir / "centerline_dict0910.pkl"
-        connectorFile = staticMapDir / "connector_dict0910.pkl"
-        with centerlineFile.open("rb") as file:
-            self.centerline_dict = pickle.load(file)
-        with connectorFile.open("rb") as file:
-            self.connector_dict = pickle.load(file)
+    def __init__(self, centerlineDict, connectorDict, mapVersion) -> None:
+        # 测试版全部地图数据由场景JSON加载后从外部传入。
+        self.centerline_dict = centerlineDict
+        self.connector_dict = connectorDict
 
         # 长路径计算结果
         self.responses = None
         self.shortPathFailedVehicleIds = []
 
         # 必要的，储存地图版本
-        self.map_version = "0910"
+        self.map_version = str(mapVersion)
 
         # 仅AGV需要DrivableAreaPlanner；Planner内部只持有该任务涉及的局部小地图。
         self.drivableAreaPlannerCaches: Dict[str, Any] = {}
@@ -359,8 +351,11 @@ class PlanningEngine:
             self, vehicleId, dynamicInfo, obstaclePolygons):
         """判断AGV的完整basePath缓存是否需要重新进行空间规划。"""
         basePath = self.vehicleBasePathCaches.get(vehicleId)
-        if (basePath is None or len(basePath) < 2
+        if (basePath is None
                 or vehicleId not in self.vehicleBaseWaypointCandidateCaches):
+            return True
+        basePath = clean_xy(basePath)
+        if len(basePath) < 2:
             return True
 
         planner = self.drivableAreaPlannerCaches.get(vehicleId)
@@ -530,31 +525,17 @@ class PlanningEngine:
 
         self.vehicleObstacleCaches = updated
 
-    def batchRoutePlan(self, requests: List[Any]) -> List[Any]:
+    def batchRoutePlan(
+            self, requests: List[Any], *, allVehicleStates,
+            allVehicleStaticInfo, centerlineDict, connectorDict, mapVersion,
+            junctionLaneIds, obstacleMap, laneSignal_zy, longRouteResult
+    ) -> List[Any]:
         self.vehicleIdsNeedWaypointUpdate.clear()
 
         # todo. 一、短路径所有输入，包括车辆动静态信息、地图、障碍物、长路径、信号灯，不能改动
-        # Map<String, DeviceBsmBodyVO>，所有车辆的状态信息，包括内外车辆，静止车辆
-        allVehicleStates = vehicleDynamicLocationService.getAllRealTimeBsm(None)
-        # Map<String, VehicleStaticVO>，查询所有车辆的静态信息，包括长宽和运动学信息，无视动力学信息，此外本地需要有一个默认值
-        allVehicleStaticInfo = vehicleStaticInfoService.getVehicleStaticInfo(None)
-
-        # Map<String, double[][]>，地图信息，每条车道的中心线坐标
-        CenterlineDict = context.getCenterlineDict()
-        # Map<String, ConnectorInfo>, 地图信息，每条车道的左右前后连接关系
-        ConnectorDict = context.getConnectorDict()
-        # String，地图信息，版本名称
-        mapVersion = context.getMapVersion()
-        # List<String>，全部交叉口内虚拟车道ID；由上游junctionMap整理后填充。
-        junctionLaneIds = []
-
-        # Map<String, ObstacleInfo>, 所有的障碍物，ObstacleInfo的格式比较复杂，我们主要是用polygon这个字段的xy属性，还有status判断是否激活
-        obstacleMap = {}
-        # <String, <String, Map>>，进口道ID -> 方向 -> {color, time}
-        laneSignal_zy = {}
-
-        # 模拟长路径计算
-        result = self.planLongRoutes(allVehicleStates, allVehicleStaticInfo, requests)  # 暂时模拟长路径规划
+        CenterlineDict = centerlineDict
+        ConnectorDict = connectorDict
+        result = longRouteResult
         # List<PathPlanningResponseVO> batchRoutePlan最终返回的结果，长路径进行了填充
         self.responses = result.responses
         # Map<String, List<String>> vehicleLaneMap是每辆车的laneId序列；
@@ -603,6 +584,7 @@ class PlanningEngine:
         # AGV按request规划候选；HV按本帧全部BSM生成固定长度basePath。
         AGV_basePathCandidates = {}  # 仅用于调试，vehicleId -> List[Nx3]
         spatialDrivableLines = {}  # 仅用于调试/可视化
+        spatialSearchNodePaths = {}  # 仅用于调试/可视化
         agvExecutableShortPathVehicleIds = set()
 
         all_obstacle_polygons = build_obstacle_polygons(
@@ -648,6 +630,9 @@ class PlanningEngine:
                 agvExecutableShortPathVehicleIds.add(vehicleId)
             AGV_basePathCandidates[vehicleId] = agv_spatial_result.candidatePaths
             spatialDrivableLines[vehicleId] = agv_spatial_result.drivableLines
+            spatialSearchNodePaths[vehicleId] = (
+                agv_spatial_result.searchNodePaths
+            )
             if agv_spatial_result.candidatePaths:
                 selectedBasePath = agv_spatial_result.candidatePaths[0].copy()
                 self.vehicleBasePathCaches[vehicleId] = selectedBasePath
@@ -840,6 +825,10 @@ class PlanningEngine:
             'historicalPriorityEdges': tuple(sorted(historicalPriorityEdges)),
             'currentPriorityEdges': tuple(sorted(newPriorityEdges)),
             'drivableLines': spatialDrivableLines,
+            'spatialSearchNodePaths': spatialSearchNodePaths,
+            'basePathCandidates': AGV_basePathCandidates,
+            'basePaths': dict(self.vehicleBasePathCaches),
+            'futurePaths': future_path,
             'futureWaypointCandidates': futureWaypointCandidates,
         }
 

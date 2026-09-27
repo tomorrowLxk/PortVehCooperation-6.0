@@ -37,6 +37,7 @@ from localPlanner.spatialPlanningStage import (
 from localPlanner.pathCollision import path_vehicle_intersects
 from localPlanner.responsePlanner import build_response_path_lists
 from localPlanner.pathGeometry import (
+    clean_xy,
     polyline_length,
     project_to_polyline,
     slice_polyline,
@@ -359,8 +360,11 @@ class PlanningEngine:
             self, vehicleId, dynamicInfo, obstaclePolygons):
         """判断AGV的完整basePath缓存是否需要重新进行空间规划。"""
         basePath = self.vehicleBasePathCaches.get(vehicleId)
-        if (basePath is None or len(basePath) < 2
+        if (basePath is None
                 or vehicleId not in self.vehicleBaseWaypointCandidateCaches):
+            return True
+        basePath = clean_xy(basePath)
+        if len(basePath) < 2:
             return True
 
         planner = self.drivableAreaPlannerCaches.get(vehicleId)
@@ -846,6 +850,7 @@ class PlanningEngine:
             'historicalPriorityEdges': tuple(sorted(historicalPriorityEdges)),
             'currentPriorityEdges': tuple(sorted(newPriorityEdges)),
             'drivableLines': spatialDrivableLines,
+
             'futureWaypointCandidates': futureWaypointCandidates,
         }
 

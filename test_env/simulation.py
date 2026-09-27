@@ -285,7 +285,13 @@ class VehicleSimulator:
                 return
             targetProgress = float(project_points_to_polyline(
                 waypointPoints, executionPath)['s'][0])
-            if targetProgress <= 1e-6:
+            targetOffset = waypointPoints[0] - np.asarray(
+                [self.x, self.y], dtype=float)
+            headingVector = np.asarray([
+                math.cos(self.heading), math.sin(self.heading)
+            ])
+            if (targetProgress <= 1e-6
+                    or float(targetOffset @ headingVector) <= 1e-6):
                 self._stop_at_current_position()
                 return
             previousSpeed = (

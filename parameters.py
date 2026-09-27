@@ -64,7 +64,7 @@ PRIORITY_CONFLICT_UPSTREAM_DISTANCE = 2.0  # 冲突锚点相对冲突区入口�
 HV_PREDICTION_HORIZON = 3.0  # HV按当前速度匀速预测的时间范围，单位s
 AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 20.0  # AGV距离历史第四个waypoint不超过该值时触发basePath重规划，单位m
 
-PATH_NODE_SPACING = 8.0  # 每条可行域线生成普通P节点的纵向间距，单位m
+PATH_NODE_SPACING = 4.0  # 每条可行域线生成普通P节点的纵向间距，单位m
 PATH_GRAPH_START_OFFSET = 10.0  # 从车辆当前位置向前首次布置P节点的距离，单位m
 PATH_MAX_LATERAL_CONNECTION_DISTANCE = 10.0  # 跨可行域线连边允许的最大横向距离，单位m
 PATH_LANE_CHANGE_LONGITUDINAL_RATIO = 2.5  # 跨线所需最小纵向距离相对横向距离的倍率
@@ -74,7 +74,7 @@ PATH_COLLISION_SAMPLE_SPACING = 0.5  # 候选path连续车辆扫掠检查的纵�
 PATH_OUTPUT_POINT_SPACING = 1.0  # 空间path最终输出的重采样间距，单位m
 PATH_CURVATURE_WINDOW = 5.0  # 评价曲率时使用的前后弧长窗口，单位m
 PATH_CURVATURE_TOLERANCE = 1.0  # 人工跨线曲线相对最小转弯半径的曲率容差倍率
-PATH_LATERAL_SAFETY_MARGIN = 1.0  # 正常path后验证时叠加到本车横向占用上的固定冗余，单位m
+PATH_LATERAL_SAFETY_MARGIN = 0.0  # 正常path后验证时叠加到本车横向占用上的固定冗余，单位m
 PATH_STATIC_STOP_DISTANCE = 5.0  # polygon上游T点要求的车头静态停车净距，单位m
 PATH_OBSTACLE_REAR_CLEARANCE = 12.0  # polygon下游恢复P节点前的额外清理距离，单位m
 PATH_G0_LATERAL_TOLERANCE = 1.0  # G末端到全局长路径横向距离小于该值时视为长路径G，单位m
