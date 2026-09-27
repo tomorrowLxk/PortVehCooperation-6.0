@@ -236,14 +236,28 @@ def plan_spatial_path(
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
     )
     searchNodePaths = []
+    searchGoals = graph.goals
+    terminalLine = graph.primaryLine
+    if stop_at_route_end:
+        terminalLine = min(
+            range(len(graph.lineMetrics)),
+            key=lambda index: (
+                graph.lineMetrics[index].project(reference[-1])['distance'],
+                index,
+            ),
+        )
+        searchGoals = [
+            node_id for node_id in graph.goals
+            if terminalLine in graph.nodes[node_id].lineS
+        ]
 
     immediate = []
     immediate.extend((node_id, "REVERSE_POINT")
-                     for node_id in graph.goals
+                     for node_id in searchGoals
                      if "R" in graph.nodes[node_id].roles)
     if stop_at_route_end:
         immediate.extend((node_id, "GLOBAL_ROUTE_END")
-                         for node_id in graph.goals
+                         for node_id in searchGoals
                          if "G" in graph.nodes[node_id].roles)
     immediate.extend((node_id, "STATIC_OBSTACLE_STOP")
                      for node_id in graph.stops)
@@ -254,7 +268,7 @@ def plan_spatial_path(
                 (graph.currentLine,), 0.0, True, reason,
             )])
 
-    for goal_id in graph.goals:
+    for goal_id in searchGoals:
         candidates, safeNodePaths, _, _ = _strict_candidates(
             graph, goal_id, reference, polygons,
             vehicle_static_info, vehicle_dynamic_info,
@@ -300,8 +314,8 @@ def plan_spatial_path(
         graph.stops,
         key=lambda node_id: (
             0 if (
-                graph.primaryLine is not None
-                and graph.primaryLine in graph.nodes[node_id].lineS
+                terminalLine is not None
+                and terminalLine in graph.nodes[node_id].lineS
             ) else 1,
             graph.nodes[node_id].lateral,
             graph.nodes[node_id].progress,
@@ -393,10 +407,17 @@ def _build_graph(
     blocked = {}
 
     length = float(static_info["length"])
+    width = float(static_info['width'])
+    longitudinal_uncertainty = float(
+        dynamic_info.get('longitudinalUncertainty', 0.0))
+    lateral_uncertainty = float(
+        dynamic_info.get('lateralUncertainty', 0.0))
     for line_index, line in enumerate(lines):
         metric = line_metrics[line_index]
         blocked[line_index] = line_blocked_intervals(
-            line, polygons, length, 0.0,
+            line, polygons, length, width,
+            longitudinal_uncertainty, lateral_uncertainty,
+            PATH_LATERAL_SAFETY_MARGIN,
             PATH_STATIC_STOP_DISTANCE,
             PATH_OBSTACLE_REAR_CLEARANCE,
             PATH_CURVE_SAMPLE_SPACING,

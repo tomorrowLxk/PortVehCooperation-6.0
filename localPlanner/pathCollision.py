@@ -89,17 +89,30 @@ def _points_in_polygon_clean(queries, fence):
 
 
 def line_blocked_intervals(
-        line, polygons, vehicle_length, longitudinal_uncertainty,
+        line, polygons, vehicle_length, vehicle_width,
+        longitudinal_uncertainty, lateral_uncertainty, lateral_margin,
         stop_distance, rear_clearance, sample_spacing):
     """按中心线点是否落入polygon生成格点图禁止布点、禁止跨越区间。"""
     if not polygons:
         return []
     dense = resample_polyline(line, sample_spacing)
     arc = arc_lengths(dense)
+    half_length = (
+        0.5 * float(vehicle_length) + float(longitudinal_uncertainty)
+    )
+    half_width = (
+        0.5 * float(vehicle_width)
+        + float(lateral_uncertainty)
+        + float(lateral_margin)
+    )
+    rectangles = _vehicle_rectangles(dense, half_length, half_width)
+    rectangle_min = np.min(rectangles, axis=1)
+    rectangle_max = np.max(rectangles, axis=1)
     raw = []
     fences = [clean_xy(polygon) for polygon in polygons]
     for obstacle_index, fence in enumerate(fences):
-        mask = _points_in_polygon_clean(dense, fence)
+        mask = _vehicle_occupancy_mask(
+            fence, rectangles, rectangle_min, rectangle_max)
         indices = np.flatnonzero(mask)
         if not len(indices):
             continue
@@ -118,16 +131,8 @@ def line_blocked_intervals(
             float(arc[group_start]), float(arc[previous]), obstacle_index
         ))
 
-    upstream = (
-            0.5 * float(vehicle_length)
-            + float(longitudinal_uncertainty)
-            + float(stop_distance)
-    )
-    downstream = (
-            0.5 * float(vehicle_length)
-            + float(longitudinal_uncertainty)
-            + float(rear_clearance)
-    )
+    upstream = float(stop_distance)
+    downstream = float(rear_clearance)
     total = float(arc[-1])
     expanded = [
         BlockedInterval(
@@ -138,6 +143,41 @@ def line_blocked_intervals(
         for start, end, obstacle_index in raw
     ]
     return _merge_intervals(expanded)
+
+
+def _vehicle_occupancy_mask(
+        fence, rectangles, rectangle_min, rectangle_max):
+    # Batch collision mask for vehicle rectangles and their swept hulls.
+    fence_min = np.min(fence, axis=0)
+    fence_max = np.max(fence, axis=0)
+    mask = np.zeros(len(rectangles), dtype=bool)
+    candidates = np.flatnonzero(np.all(
+        (rectangle_max >= fence_min) & (rectangle_min <= fence_max),
+        axis=1,
+    ))
+    if len(candidates):
+        mask[candidates] = _polygons_intersect_many(
+            rectangles[candidates], fence)
+
+    if len(rectangles) < 2:
+        return mask
+    sweep_min = np.minimum(rectangle_min[:-1], rectangle_min[1:])
+    sweep_max = np.maximum(rectangle_max[:-1], rectangle_max[1:])
+    sweep_candidates = np.flatnonzero(np.all(
+        (sweep_max >= fence_min) & (sweep_min <= fence_max), axis=1,
+    ))
+    sweep_groups = {}
+    for index in sweep_candidates:
+        sweep = _convex_hull(np.vstack(
+            (rectangles[index], rectangles[index + 1])))
+        sweep_groups.setdefault(len(sweep), []).append((int(index), sweep))
+    for sweeps in sweep_groups.values():
+        hits = _polygons_intersect_many(
+            np.asarray([sweep for _, sweep in sweeps], dtype=float), fence)
+        for (index, _), hit in zip(sweeps, hits):
+            if hit:
+                mask[index:index + 2] = True
+    return mask
 
 
 def interval_contains(intervals, value):
