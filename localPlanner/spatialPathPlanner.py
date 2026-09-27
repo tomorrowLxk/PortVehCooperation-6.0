@@ -858,7 +858,7 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
     best = {}
     results = {}
     result_limit = PATH_MAX_CANDIDATES
-    signatures_per_node = {}
+    settled_signatures_per_node = {}
     pair_sensitive = bool(collision_pairs or curvature_pairs)
     while queue:
         cost, _, _, node_id, previous_edge, signature, edge_ids = heapq.heappop(queue)
@@ -869,6 +869,11 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
         )
         if cost > best.get(state_key, float("inf")) + 1e-9:
             continue
+        settled_signatures = settled_signatures_per_node.setdefault(node_id, set())
+        if signature not in settled_signatures:
+            if len(settled_signatures) >= PATH_MAX_SIGNATURES_PER_NODE:
+                continue
+            settled_signatures.add(signature)
         if node_id == target_id:
             results.setdefault(signature, (cost, edge_ids))
             if len(results) >= result_limit:
@@ -884,11 +889,6 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
             new_signature = signature
             if not new_signature or new_signature[-1] != edge.targetLine:
                 new_signature = signature + (edge.targetLine,)
-            known = signatures_per_node.setdefault(edge.target, set())
-            if (new_signature not in known
-                    and len(known) >= PATH_MAX_SIGNATURES_PER_NODE):
-                continue
-            known.add(new_signature)
             new_cost = cost + edge.cost
             new_key = (
                 edge.target,
