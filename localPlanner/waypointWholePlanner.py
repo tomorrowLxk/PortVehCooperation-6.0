@@ -446,7 +446,7 @@ def _build_candidate_constraints(
             for value in sample_s:
                 low_point = point_at_s(prepared['futurePath'], value)
                 low_heading = _path_heading(prepared['futurePath'], value)
-                conflict = _last_collision_exit(
+                conflict = _last_conflicting_position(
                     high_whole,
                     high_geometry,
                     low_point,
@@ -460,18 +460,12 @@ def _build_candidate_constraints(
                 if conflict is None:
                     continue
 
-                exit_s, blocked = conflict
-                high_speed = high_whole.speed_at_s(exit_s)
-                exit_time = high_whole.time_at_s(min(
-                    exit_s, float(high_whole.motionS[-1])))
-                if (not blocked
-                        and exit_s > high_whole.motionS[-1] + 1e-9
-                        and high_speed > 1e-9):
-                    exit_time += (
-                        exit_s - high_whole.motionS[-1]) / high_speed
+                conflict_s, blocked = conflict
+                high_speed = high_whole.speed_at_s(conflict_s)
                 required_time = (
                     float('inf') if blocked
-                    else exit_time + COOPERATION_TIME_CLEARANCE
+                    else high_whole.time_at_s(conflict_s)
+                    + COOPERATION_TIME_CLEARANCE
                 )
                 if blocked or high_speed <= 1e-9:
                     left_required = required_time
@@ -694,6 +688,9 @@ def _first_aeb_unsafe_stop_index(
             continue
 
         high_whole = check['highWhole']
+        if (not high_whole.stopped
+                and arrival_time > high_whole.motionTimes[-1] + 1e-9):
+            continue
         high_s, high_speed = high_whole.state_at_time(arrival_time)
         low_speed = low_whole.speed_at_s(low_s)
         delta_v = max(0.0, low_speed - high_speed)
@@ -788,10 +785,16 @@ def _build_whole(
     arrival = times[nodes]
     point_speeds = speeds[nodes]
     if len(nodes) > 1:
-        output_segment_speeds = np.asarray([
-            segment_speeds[nodes[index]]
-            for index in range(len(nodes) - 1)
-        ], dtype=float)
+        candidate_durations = np.diff(arrival)
+        output_segment_speeds = np.divide(
+            np.diff(candidate_s),
+            candidate_durations,
+            out=np.zeros(len(nodes) - 1, dtype=float),
+            where=(
+                np.isfinite(candidate_durations)
+                & (candidate_durations > 1e-9)
+            ),
+        )
     else:
         output_segment_speeds = np.empty(0, dtype=float)
     terminal_speed = float(point_speeds[-1]) if len(point_speeds) else 0.0
@@ -815,7 +818,7 @@ def _build_whole(
     )
 
 
-def _last_collision_exit(
+def _last_conflicting_position(
         high_whole, high_geometry, low_point, low_heading,
         high_static, high_dynamic, low_static, low_dynamic,
         longitudinal_gap):
@@ -828,7 +831,7 @@ def _last_collision_exit(
             longitudinal_gap,
             high_geometry,
         )
-        return (0.0, True) if collides else None
+        return (0.0, bool(high_whole.stopped)) if collides else None
 
     spacing = max(0.1, COOPERATION_CONFLICT_SAMPLE_SPACING)
     samples = np.arange(0.0, end_s, spacing)
@@ -847,45 +850,11 @@ def _last_collision_exit(
     if len(entered) == 0:
         return None
     last = int(entered[-1])
-    if last < len(samples) - 1:
-        lower = float(samples[last])
-        upper = float(samples[last + 1])
-    else:
-        if high_whole.stopped or high_whole.terminalSpeed <= 1e-9:
-            return end_s, True
-        extension = (
-            float(high_static['length'])
-            + float(low_static['length'])
-            + 2.0 * float(longitudinal_gap)
-            + 2.0 * (
-                float(high_static['width'])
-                + float(low_static['width'])
-            )
-        )
-        extended_samples = np.arange(
-            end_s + spacing,
-            end_s + extension + spacing,
-            spacing,
-        )
-        extended_collision = np.asarray([
-            _vehicle_rectangles_overlap(
-                high_whole.futurePath, value,
-                high_static, high_dynamic,
-                low_point, low_heading, low_static, low_dynamic,
-                longitudinal_gap,
-                high_geometry,
-            )
-            for value in extended_samples
-        ], dtype=bool)
-        exits = np.flatnonzero(~extended_collision)
-        if len(exits) == 0:
-            return end_s, True
-        upper_index = int(exits[0])
-        lower = (
-            end_s if upper_index == 0
-            else float(extended_samples[upper_index - 1])
-        )
-        upper = float(extended_samples[upper_index])
+    if last >= len(samples) - 1:
+        return end_s, bool(high_whole.stopped)
+
+    lower = float(samples[last])
+    upper = float(samples[last + 1])
     for _ in range(16):
         middle = 0.5 * (lower + upper)
         if _vehicle_rectangles_overlap(
@@ -897,7 +866,7 @@ def _last_collision_exit(
             lower = middle
         else:
             upper = middle
-    return upper, False
+    return lower, False
 
 
 def _vehicle_rectangles_overlap(
@@ -955,12 +924,7 @@ def _collision_state_at_s(geometry, value):
     points, arc = geometry
     if len(points) < 2:
         return points[0].copy(), np.asarray([1.0, 0.0])
-    target = max(0.0, float(value))
-    if target >= arc[-1]:
-        segment = points[-1] - points[-2]
-        length = float(arc[-1] - arc[-2])
-        tangent = segment / length
-        return points[-1] + (target - arc[-1]) * tangent, tangent
+    target = float(np.clip(value, 0.0, arc[-1]))
     index = min(
         int(np.searchsorted(arc, target, side='right') - 1),
         len(points) - 2,
