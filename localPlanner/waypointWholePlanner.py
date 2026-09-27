@@ -840,14 +840,12 @@ def _first_collision_exit(
     entered = np.flatnonzero(collision)
     if len(entered) == 0:
         return None
-    first = int(entered[0])
-    exits = np.flatnonzero(~collision[first + 1:])
-    if len(exits) == 0:
+    last = int(entered[-1])
+    if last >= len(samples) - 1:
         return end_s, True
 
-    upper_index = first + 1 + int(exits[0])
-    lower = float(samples[upper_index - 1])
-    upper = float(samples[upper_index])
+    lower = float(samples[last])
+    upper = float(samples[last + 1])
     for _ in range(16):
         middle = 0.5 * (lower + upper)
         if _vehicle_rectangles_overlap(
