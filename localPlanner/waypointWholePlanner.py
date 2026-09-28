@@ -756,31 +756,30 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
             lowest_limits[first_adjustable:node_index + 1],
             COOPERATION_STOP_SPEED_THRESHOLD,
         )
-        lowest = _build_whole(
-            prepared, lowest_limits, static, dynamic, segments)
-        if lowest.arrivalTimes[index] < required_time - 1e-6:
+        lowest_arrival = _candidate_arrival_time(
+            prepared, lowest_limits, static, dynamic, index)
+        if lowest_arrival < required_time - 1e-6:
             return _stop_before_constraint(
                 prepared, limits, index, segments, static, dynamic)
 
         lower = COOPERATION_STOP_SPEED_THRESHOLD
         upper = float(np.max(limits[first_adjustable:node_index + 1]))
         selected_limits = lowest_limits
-        selected = lowest
         for _ in range(18):
             middle = 0.5 * (lower + upper)
             candidate_limits = limits.copy()
             candidate_limits[first_adjustable:node_index + 1] = np.minimum(
                 candidate_limits[first_adjustable:node_index + 1], middle)
-            candidate = _build_whole(
-                prepared, candidate_limits, static, dynamic, segments)
-            if candidate.arrivalTimes[index] >= required_time:
+            candidate_arrival = _candidate_arrival_time(
+                prepared, candidate_limits, static, dynamic, index)
+            if candidate_arrival >= required_time:
                 selected_limits = candidate_limits
-                selected = candidate
                 lower = middle
             else:
                 upper = middle
         limits = selected_limits
-        whole = selected
+        whole = _build_whole(
+            prepared, limits, static, dynamic, segments)
 
     unsafe_stop_index = _first_aeb_unsafe_stop_index(
         whole, prepared, constraints['aebChecks'])
@@ -863,31 +862,8 @@ def _build_whole(
         prepared, speed_limits, static, dynamic,
         conflict_segments, stopped=False):
     node_s = prepared['nodeS']
-    distances = np.diff(node_s)
-    if len(node_s) == 1:
-        speeds = np.asarray([
-            0.0 if stopped else min(
-                float(dynamic['speed']), float(speed_limits[0]))
-        ])
-        segment_speeds = np.empty(0, dtype=float)
-        times = np.asarray([0.0])
-    else:
-        speeds = speed_envelope_values(
-            speed_limits,
-            distances,
-            float(dynamic['speed']),
-            float(static['maxAcceleration']),
-            float(static['maxDeceleration']),
-        )
-        segment_speeds = 0.5 * (speeds[:-1] + speeds[1:])
-        durations = np.divide(
-            distances,
-            segment_speeds,
-            out=np.full(len(distances), np.inf, dtype=float),
-            where=segment_speeds > 1e-9,
-        )
-        times = np.r_[0.0, np.cumsum(durations)]
-
+    speeds, segment_speeds, times = _motion_profile(
+        node_s, speed_limits, static, dynamic, stopped)
     nodes = prepared['candidateNodes']
     points = prepared['candidates'][:, :2].copy()
     candidate_s = prepared['candidateS'].copy()
@@ -925,6 +901,41 @@ def _build_whole(
         motionSpeedLimits=np.asarray(speed_limits, dtype=float).copy(),
         candidateNodeIndices=nodes.copy(),
     )
+
+
+def _candidate_arrival_time(
+        prepared, speed_limits, static, dynamic, candidate_index):
+    _, _, times = _motion_profile(
+        prepared['nodeS'], speed_limits, static, dynamic, False)
+    return float(times[prepared['candidateNodes'][candidate_index]])
+
+
+def _motion_profile(node_s, speed_limits, static, dynamic, stopped):
+    distances = np.diff(node_s)
+    if len(node_s) == 1:
+        speeds = np.asarray([
+            0.0 if stopped else min(
+                float(dynamic['speed']), float(speed_limits[0]))
+        ])
+        segment_speeds = np.empty(0, dtype=float)
+        times = np.asarray([0.0])
+    else:
+        speeds = speed_envelope_values(
+            speed_limits,
+            distances,
+            float(dynamic['speed']),
+            float(static['maxAcceleration']),
+            float(static['maxDeceleration']),
+        )
+        segment_speeds = 0.5 * (speeds[:-1] + speeds[1:])
+        durations = np.divide(
+            distances,
+            segment_speeds,
+            out=np.full(len(distances), np.inf, dtype=float),
+            where=segment_speeds > 1e-9,
+        )
+        times = np.r_[0.0, np.cumsum(durations)]
+    return speeds, segment_speeds, times
 
 
 def _last_conflicting_positions(
