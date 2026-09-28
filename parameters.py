@@ -53,7 +53,6 @@ COOPERATION_LATERAL_MARGIN = 1.0  # 每辆车参与协同分块时增加的侧�
 COOPERATION_PATH_SIMPLIFICATION_MARGIN = 0.5  # 两条4m折线近似产生的合计横向补偿，单位m
 COOPERATION_STATIC_GAP = 6.0  # 协同碰撞检测使用的固定纵向跟驰净距，单位m
 COOPERATION_TIME_CLEARANCE = 0.5  # 低优先级车辆晚于高优先级车辆清空冲突位置的时间余量，单位s
-COOPERATION_CONFLICT_SAMPLE_SPACING = 4.0  # 沿高优先级车辆futurePath粗搜索冲突出口的采样间距，出口位置再二分精化，单位m
 COOPERATION_CONFLICT_SEGMENT_MERGE_DISTANCE = 6.0  # 两个冲突候选点段允许合并的最大沿futurePath距离，单位m
 COOPERATION_STOP_SPEED_THRESHOLD = 0.5  # 协同所需通行速度低于该值时改为停车，单位m/s
 COOPERATION_EMERGENCY_DECELERATION = 6.0  # AEB安全距离使用的紧急减速度，单位m/s²
