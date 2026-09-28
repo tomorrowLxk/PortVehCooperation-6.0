@@ -8,15 +8,12 @@ import numpy as np
 from localPlanner.pathGeometry import (
     arc_lengths,
     clean_xy,
-    point_at_s,
     project_to_polyline,
     slice_polyline,
-    tangent_at_s,
 )
 from localPlanner.pathSpeedPlanner import speed_envelope_values
 from parameters import (
     COOPERATION_AEB_STATIC_GAP,
-    COOPERATION_CONFLICT_SAMPLE_SPACING,
     COOPERATION_CONFLICT_SEGMENT_MERGE_DISTANCE,
     COOPERATION_EMERGENCY_DECELERATION,
     COOPERATION_LATERAL_MARGIN,
@@ -136,6 +133,7 @@ def plan_block_waypoint_whole(
         vehicle_static_info, vehicle_dynamic_info):
     """按一个协同块的完整优先级由高到低生成waypointWhole。"""
     accepted = {}
+    accepted_geometry = {}
     predecessors = _priority_predecessors(
         priority_decision.members,
         priority_decision.priorityEdges,
@@ -155,24 +153,34 @@ def plan_block_waypoint_whole(
                 vehicle_static_info[vehicle_id],
                 vehicle_dynamic_info[vehicle_id],
             )
+            accepted_geometry[vehicle_id] = _truncate_spatial_geometry(
+                prepared['spatialGeometry'],
+                accepted[vehicle_id].motionS[-1],
+            )
             continue
 
         constraints = _build_candidate_constraints(
-            vehicle_id,
             prepared,
             {
                 high_id: accepted[high_id]
                 for high_id in predecessors[vehicle_id]
                 if high_id in accepted
             },
-            vehicle_static_info,
-            vehicle_dynamic_info,
+            {
+                high_id: accepted_geometry[high_id]
+                for high_id in predecessors[vehicle_id]
+                if high_id in accepted_geometry
+            },
         )
         accepted[vehicle_id] = _apply_candidate_constraints(
             prepared,
             constraints,
             vehicle_static_info[vehicle_id],
             vehicle_dynamic_info[vehicle_id],
+        )
+        accepted_geometry[vehicle_id] = _truncate_spatial_geometry(
+            prepared['spatialGeometry'],
+            accepted[vehicle_id].motionS[-1],
         )
 
     return accepted
@@ -379,7 +387,7 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
 
     limits = np.interp(node_s, source_s, source_limits)
     limits = np.minimum(limits, float(static['maxSpeed']))
-    return {
+    prepared = {
         'vehicleId': str(vehicle_id),
         'futurePath': path,
         'candidates': raw,
@@ -389,6 +397,9 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
         'candidateNodes': candidate_nodes,
         'speedLimits': np.maximum(0.0, limits),
     }
+    prepared['spatialGeometry'] = _prepare_spatial_geometry(
+        path, source_s, prepared['candidateS'], static, dynamic)
+    return prepared
 
 
 def _prepare_speed_path(path, maximum_speed):
@@ -412,90 +423,181 @@ def _prepare_speed_path(path, maximum_speed):
     return xy, arc_lengths(xy), values
 
 
-def _build_candidate_constraints(
-        low_id, prepared, accepted, static_info, dynamic_info):
+def _prepare_spatial_geometry(path, path_s, candidate_s, static, dynamic):
+    sample_s, left, right, starts, ends = _constraint_sample_layout(candidate_s)
+    centers, tangents = _path_states_at_s(path, path_s, sample_s)
+    return {
+        'path': path,
+        'pathS': path_s,
+        'sampleS': sample_s,
+        'centers': centers,
+        'tangents': tangents,
+        'normals': np.column_stack((-tangents[:, 1], tangents[:, 0])),
+        'leftCandidate': left,
+        'rightCandidate': right,
+        'segmentStartS': starts,
+        'segmentEndS': ends,
+        'halfLength': (
+            0.5 * float(static['length'])
+            + float(dynamic.get('longitudinalUncertainty', 0.0))
+        ),
+        'halfWidth': (
+            0.5 * float(static['width'])
+            + float(dynamic.get('lateralUncertainty', 0.0))
+            + 0.5 * COOPERATION_LATERAL_MARGIN
+        ),
+    }
+
+
+def _constraint_sample_layout(candidate_s):
+    values, lefts, rights, starts, ends = [], [], [], [], []
+    if len(candidate_s) <= 1:
+        value = float(candidate_s[0]) if len(candidate_s) else 0.0
+        return (
+            np.asarray([value]),
+            np.asarray([0], dtype=int),
+            np.asarray([0], dtype=int),
+            np.asarray([value]),
+            np.asarray([value]),
+        )
+
+    for right in range(1, len(candidate_s)):
+        left = right - 1
+        start_s = float(candidate_s[left])
+        end_s = float(candidate_s[right])
+        segment_count = max(
+            1, int(math.ceil(
+                (end_s - start_s) / WAYPOINT_CANDIDATE_SPACING)))
+        segment_samples = np.linspace(start_s, end_s, segment_count + 1)
+        if right > 1:
+            segment_samples = segment_samples[1:]
+        values.extend(segment_samples)
+        lefts.extend([left] * len(segment_samples))
+        rights.extend([right] * len(segment_samples))
+        starts.extend([start_s] * len(segment_samples))
+        ends.extend([end_s] * len(segment_samples))
+    return (
+        np.asarray(values, dtype=float),
+        np.asarray(lefts, dtype=int),
+        np.asarray(rights, dtype=int),
+        np.asarray(starts, dtype=float),
+        np.asarray(ends, dtype=float),
+    )
+
+
+def _path_states_at_s(path, path_s, values):
+    targets = np.clip(np.asarray(values, dtype=float), path_s[0], path_s[-1])
+    if len(path) == 1:
+        centers = np.repeat(path[:1], len(targets), axis=0)
+        tangents = np.tile(np.asarray([[1.0, 0.0]]), (len(targets), 1))
+        return centers, tangents
+
+    indices = np.searchsorted(path_s, targets, side='right') - 1
+    indices = np.clip(indices, 0, len(path) - 2)
+    segments = path[indices + 1] - path[indices]
+    lengths = path_s[indices + 1] - path_s[indices]
+    ratios = np.divide(
+        targets - path_s[indices], lengths,
+        out=np.zeros(len(targets), dtype=float),
+        where=lengths > 1e-12,
+    )
+    centers = path[indices] + ratios[:, None] * segments
+    tangents = np.divide(
+        segments, lengths[:, None],
+        out=np.tile(np.asarray([[1.0, 0.0]]), (len(targets), 1)),
+        where=lengths[:, None] > 1e-12,
+    )
+    return centers, tangents
+
+
+def _truncate_spatial_geometry(geometry, end_s):
+    end_s = float(np.clip(end_s, geometry['pathS'][0], geometry['pathS'][-1]))
+    keep = geometry['sampleS'] <= end_s + 1e-9
+    sample_s = geometry['sampleS'][keep]
+    centers = geometry['centers'][keep]
+    tangents = geometry['tangents'][keep]
+    normals = geometry['normals'][keep]
+    if len(sample_s) == 0 or abs(sample_s[-1] - end_s) > 1e-9:
+        end_center, end_tangent = _path_states_at_s(
+            geometry['path'], geometry['pathS'], [end_s])
+        sample_s = np.r_[sample_s, end_s]
+        centers = np.vstack((centers, end_center))
+        tangents = np.vstack((tangents, end_tangent))
+        normals = np.vstack((
+            normals,
+            np.asarray([[-end_tangent[0, 1], end_tangent[0, 0]]]),
+        ))
+    return {
+        'path': geometry['path'],
+        'pathS': geometry['pathS'],
+        'sampleS': sample_s,
+        'centers': centers,
+        'tangents': tangents,
+        'normals': normals,
+        'halfLength': geometry['halfLength'],
+        'halfWidth': geometry['halfWidth'],
+    }
+
+
+def _build_candidate_constraints(prepared, accepted, accepted_geometry):
     count = len(prepared['candidates'])
     required = np.full(count, -np.inf, dtype=float)
     speed_caps = np.full(count, np.inf, dtype=float)
     all_segments = []
     aeb_checks = []
 
+    low_geometry = prepared['spatialGeometry']
     for high_id, high_whole in accepted.items():
-        high_geometry = _prepare_collision_geometry(high_whole.futurePath)
+        high_geometry = accepted_geometry[high_id]
         pair_required = np.full(count, np.nan, dtype=float)
         pair_speed_caps = np.full(count, np.nan, dtype=float)
-        candidate_s = prepared['candidateS']
-        segment_ranges = (
-            [(0, 0)] if count == 1
-            else [(index - 1, index) for index in range(1, count)]
+        conflict_s, blocked_mask = _last_conflicting_positions(
+            low_geometry,
+            high_geometry,
+            high_whole.stopped,
+            COOPERATION_STATIC_GAP,
         )
-        for segment_number, (left, right) in enumerate(segment_ranges):
-            start_s = float(candidate_s[left])
-            end_s = float(candidate_s[right])
-            if left == right:
-                sample_s = np.asarray([start_s])
+        for sample_index in np.flatnonzero(np.isfinite(conflict_s)):
+            value = float(low_geometry['sampleS'][sample_index])
+            left = int(low_geometry['leftCandidate'][sample_index])
+            right = int(low_geometry['rightCandidate'][sample_index])
+            start_s = float(low_geometry['segmentStartS'][sample_index])
+            end_s = float(low_geometry['segmentEndS'][sample_index])
+            high_s = float(conflict_s[sample_index])
+            blocked = bool(blocked_mask[sample_index])
+            high_speed = high_whole.speed_at_s(high_s)
+            required_time = (
+                float('inf') if blocked
+                else high_whole.time_at_s(high_s)
+                + COOPERATION_TIME_CLEARANCE
+            )
+            if blocked or high_speed <= 1e-9:
+                left_required = required_time
+                right_required = required_time
             else:
-                segment_count = max(
-                    1, int(math.ceil(
-                        (end_s - start_s) / WAYPOINT_CANDIDATE_SPACING)))
-                sample_s = np.linspace(
-                    start_s, end_s, segment_count + 1)
-                if segment_number > 0:
-                    sample_s = sample_s[1:]
-
-            for value in sample_s:
-                low_point = point_at_s(prepared['futurePath'], value)
-                low_heading = _path_heading(prepared['futurePath'], value)
-                conflict = _last_conflicting_position(
-                    high_whole,
-                    high_geometry,
-                    low_point,
-                    low_heading,
-                    static_info[high_id],
-                    dynamic_info[high_id],
-                    static_info[low_id],
-                    dynamic_info[low_id],
-                    COOPERATION_STATIC_GAP,
+                left_required = max(
+                    0.0,
+                    required_time - (value - start_s) / high_speed,
                 )
-                if conflict is None:
-                    continue
+                right_required = (
+                    required_time + (end_s - value) / high_speed)
 
-                conflict_s, blocked = conflict
-                high_speed = high_whole.speed_at_s(conflict_s)
-                required_time = (
-                    float('inf') if blocked
-                    else high_whole.time_at_s(conflict_s)
-                    + COOPERATION_TIME_CLEARANCE
-                )
-                if blocked or high_speed <= 1e-9:
-                    left_required = required_time
-                    right_required = required_time
-                else:
-                    left_required = max(
-                        0.0,
-                        required_time - (value - start_s) / high_speed,
-                    )
-                    right_required = (
-                        required_time + (end_s - value) / high_speed)
-
-                pair_required[left] = _maximum_optional(
-                    pair_required[left], left_required)
-                pair_required[right] = _maximum_optional(
-                    pair_required[right], right_required)
-                pair_speed_caps[left] = _minimum_optional(
-                    pair_speed_caps[left], high_speed)
-                pair_speed_caps[right] = _minimum_optional(
-                    pair_speed_caps[right], high_speed)
-                aeb_checks.append({
-                    'highWhole': high_whole,
-                    'highGeometry': high_geometry,
-                    'highStatic': static_info[high_id],
-                    'highDynamic': dynamic_info[high_id],
-                    'lowS': float(value),
-                    'stopIndex': int(
-                        max(0, left - 1)
-                        if value <= start_s + 1e-9 else left),
-                })
+            pair_required[left] = _maximum_optional(
+                pair_required[left], left_required)
+            pair_required[right] = _maximum_optional(
+                pair_required[right], right_required)
+            pair_speed_caps[left] = _minimum_optional(
+                pair_speed_caps[left], high_speed)
+            pair_speed_caps[right] = _minimum_optional(
+                pair_speed_caps[right], high_speed)
+            aeb_checks.append({
+                'highWhole': high_whole,
+                'highGeometry': high_geometry,
+                'lowS': value,
+                'stopIndex': int(
+                    max(0, left - 1)
+                    if value <= start_s + 1e-9 else left),
+            })
 
         raw_mask = ~np.isnan(pair_required)
         if not np.any(raw_mask):
@@ -664,7 +766,7 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
         whole = selected
 
     unsafe_stop_index = _first_aeb_unsafe_stop_index(
-        whole, prepared, constraints['aebChecks'], static, dynamic)
+        whole, prepared, constraints['aebChecks'])
     if unsafe_stop_index is not None:
         return _stop_at_candidate(
             prepared,
@@ -677,8 +779,7 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
     return whole
 
 
-def _first_aeb_unsafe_stop_index(
-        low_whole, prepared, checks, low_static, low_dynamic):
+def _first_aeb_unsafe_stop_index(low_whole, prepared, checks):
     for check in sorted(checks, key=lambda value: value['lowS']):
         low_s = float(check['lowS'])
         if low_s > low_whole.motionS[-1] + 1e-9:
@@ -702,19 +803,10 @@ def _first_aeb_unsafe_stop_index(
         if aeb_gap <= COOPERATION_STATIC_GAP + 1e-9:
             continue
 
-        low_point = point_at_s(prepared['futurePath'], low_s)
-        low_heading = _path_heading(prepared['futurePath'], low_s)
-        if _vehicle_rectangles_overlap(
-                high_whole.futurePath,
-                high_s,
-                check['highStatic'],
-                check['highDynamic'],
-                low_point,
-                low_heading,
-                low_static,
-                low_dynamic,
-                aeb_gap,
-                check['highGeometry']):
+        if _overlap_at_s(
+                prepared['spatialGeometry'], low_s,
+                check['highGeometry'], high_s,
+                aeb_gap):
             return int(check['stopIndex'])
     return None
 
@@ -818,130 +910,123 @@ def _build_whole(
     )
 
 
-def _last_conflicting_position(
-        high_whole, high_geometry, low_point, low_heading,
-        high_static, high_dynamic, low_static, low_dynamic,
-        longitudinal_gap):
-    end_s = float(high_whole.motionS[-1])
-    if end_s <= 1e-9:
-        collides = _vehicle_rectangles_overlap(
-            high_whole.futurePath, 0.0,
-            high_static, high_dynamic,
-            low_point, low_heading, low_static, low_dynamic,
-            longitudinal_gap,
-            high_geometry,
-        )
-        return (0.0, bool(high_whole.stopped)) if collides else None
+def _last_conflicting_positions(
+        low_geometry, high_geometry, high_stopped, longitudinal_gap):
+    collision = _overlap_matrix(
+        low_geometry, high_geometry, longitudinal_gap)
+    high_count = len(high_geometry['sampleS'])
+    high_indices = np.arange(high_count, dtype=int)
+    last = np.max(np.where(collision, high_indices[None, :], -1), axis=1)
+    valid = last >= 0
+    conflict_s = np.full(len(last), np.nan, dtype=float)
+    conflict_s[valid] = high_geometry['sampleS'][last[valid]]
+    blocked = valid & (last == high_count - 1) & bool(high_stopped)
 
-    spacing = max(0.1, COOPERATION_CONFLICT_SAMPLE_SPACING)
-    samples = np.arange(0.0, end_s, spacing)
-    samples = np.r_[samples, end_s]
-    collision = np.asarray([
-        _vehicle_rectangles_overlap(
-            high_whole.futurePath, value,
-            high_static, high_dynamic,
-            low_point, low_heading, low_static, low_dynamic,
-            longitudinal_gap,
-            high_geometry,
-        )
-        for value in samples
-    ], dtype=bool)
-    entered = np.flatnonzero(collision)
-    if len(entered) == 0:
-        return None
-    last = int(entered[-1])
-    if last >= len(samples) - 1:
-        return end_s, bool(high_whole.stopped)
-
-    lower = float(samples[last])
-    upper = float(samples[last + 1])
-    for _ in range(16):
-        middle = 0.5 * (lower + upper)
-        if _vehicle_rectangles_overlap(
-                high_whole.futurePath, middle,
-                high_static, high_dynamic,
-                low_point, low_heading, low_static, low_dynamic,
-                longitudinal_gap,
-                high_geometry):
-            lower = middle
-        else:
-            upper = middle
-    return lower, False
+    refining = np.flatnonzero(valid & (last < high_count - 1))
+    if len(refining):
+        lower = high_geometry['sampleS'][last[refining]].copy()
+        upper = high_geometry['sampleS'][last[refining] + 1].copy()
+        low_centers = low_geometry['centers'][refining]
+        low_tangents = low_geometry['tangents'][refining]
+        low_normals = low_geometry['normals'][refining]
+        for _ in range(16):
+            middle = 0.5 * (lower + upper)
+            high_centers, high_tangents = _path_states_at_s(
+                high_geometry['path'], high_geometry['pathS'], middle)
+            high_normals = np.column_stack((
+                -high_tangents[:, 1], high_tangents[:, 0]))
+            overlaps = _overlap_pairs(
+                low_centers, low_tangents, low_normals,
+                high_centers, high_tangents, high_normals,
+                low_geometry['halfLength'] + longitudinal_gap,
+                low_geometry['halfWidth'],
+                high_geometry['halfLength'],
+                high_geometry['halfWidth'],
+            )
+            lower = np.where(overlaps, middle, lower)
+            upper = np.where(overlaps, upper, middle)
+        conflict_s[refining] = lower
+    return conflict_s, blocked
 
 
-def _vehicle_rectangles_overlap(
-        high_path, high_s, high_static, high_dynamic,
-        low_point, low_heading, low_static, low_dynamic,
-        longitudinal_gap, high_geometry=None):
-    geometry = (
-        high_geometry
-        if high_geometry is not None
-        else _prepare_collision_geometry(high_path)
+def _overlap_matrix(low, high, longitudinal_gap):
+    delta = low['centers'][:, None, :] - high['centers'][None, :, :]
+    low_tangent = low['tangents']
+    low_normal = low['normals']
+    high_tangent = high['tangents']
+    high_normal = high['normals']
+
+    tangent_tangent = np.abs(low_tangent @ high_tangent.T)
+    normal_tangent = np.abs(low_normal @ high_tangent.T)
+    tangent_normal = np.abs(low_tangent @ high_normal.T)
+    normal_normal = np.abs(low_normal @ high_normal.T)
+
+    low_length = low['halfLength'] + longitudinal_gap
+    low_width = low['halfWidth']
+    high_length = high['halfLength']
+    high_width = high['halfWidth']
+    tolerance = 1e-9
+
+    return (
+        np.abs(np.einsum('lhk,hk->lh', delta, high_tangent))
+        <= high_length + low_length * tangent_tangent
+        + low_width * normal_tangent + tolerance
+    ) & (
+        np.abs(np.einsum('lhk,hk->lh', delta, high_normal))
+        <= high_width + low_length * tangent_normal
+        + low_width * normal_normal + tolerance
+    ) & (
+        np.abs(np.einsum('lhk,lk->lh', delta, low_tangent))
+        <= low_length + high_length * tangent_tangent
+        + high_width * tangent_normal + tolerance
+    ) & (
+        np.abs(np.einsum('lhk,lk->lh', delta, low_normal))
+        <= low_width + high_length * normal_tangent
+        + high_width * normal_normal + tolerance
     )
-    high_center, high_tangent = _collision_state_at_s(
-        geometry, high_s)
-    high_heading = math.atan2(high_tangent[1], high_tangent[0])
-    high_axes = _vehicle_axes(high_heading)
-    low_axes = _vehicle_axes(low_heading)
-    high_half = np.asarray([
-        0.5 * float(high_static['length'])
-        + float(high_dynamic.get('longitudinalUncertainty', 0.0)),
-        0.5 * float(high_static['width'])
-        + float(high_dynamic.get('lateralUncertainty', 0.0))
-        + 0.5 * COOPERATION_LATERAL_MARGIN,
-    ])
-    low_half = np.asarray([
-        0.5 * float(low_static['length'])
-        + float(low_dynamic.get('longitudinalUncertainty', 0.0))
-        + float(longitudinal_gap),
-        0.5 * float(low_static['width'])
-        + float(low_dynamic.get('lateralUncertainty', 0.0))
-        + 0.5 * COOPERATION_LATERAL_MARGIN,
-    ])
-    difference = np.asarray(low_point, dtype=float)[:2] - high_center
-    for axis in (
-            high_axes[0], high_axes[1], low_axes[0], low_axes[1]):
-        center_distance = abs(float(np.dot(difference, axis)))
-        high_radius = (
-            high_half[0] * abs(float(np.dot(high_axes[0], axis)))
-            + high_half[1] * abs(float(np.dot(high_axes[1], axis)))
-        )
-        low_radius = (
-            low_half[0] * abs(float(np.dot(low_axes[0], axis)))
-            + low_half[1] * abs(float(np.dot(low_axes[1], axis)))
-        )
-        if center_distance > high_radius + low_radius + 1e-9:
-            return False
-    return True
 
 
-def _prepare_collision_geometry(path):
-    points = clean_xy(path)
-    return points, arc_lengths(points)
-
-
-def _collision_state_at_s(geometry, value):
-    points, arc = geometry
-    if len(points) < 2:
-        return points[0].copy(), np.asarray([1.0, 0.0])
-    target = float(np.clip(value, 0.0, arc[-1]))
-    index = min(
-        int(np.searchsorted(arc, target, side='right') - 1),
-        len(points) - 2,
+def _overlap_pairs(
+        low_centers, low_tangents, low_normals,
+        high_centers, high_tangents, high_normals,
+        low_length, low_width, high_length, high_width):
+    delta = low_centers - high_centers
+    tangent_tangent = np.abs(np.sum(low_tangents * high_tangents, axis=1))
+    normal_tangent = np.abs(np.sum(low_normals * high_tangents, axis=1))
+    tangent_normal = np.abs(np.sum(low_tangents * high_normals, axis=1))
+    normal_normal = np.abs(np.sum(low_normals * high_normals, axis=1))
+    tolerance = 1e-9
+    return (
+        np.abs(np.sum(delta * high_tangents, axis=1))
+        <= high_length + low_length * tangent_tangent
+        + low_width * normal_tangent + tolerance
+    ) & (
+        np.abs(np.sum(delta * high_normals, axis=1))
+        <= high_width + low_length * tangent_normal
+        + low_width * normal_normal + tolerance
+    ) & (
+        np.abs(np.sum(delta * low_tangents, axis=1))
+        <= low_length + high_length * tangent_tangent
+        + high_width * tangent_normal + tolerance
+    ) & (
+        np.abs(np.sum(delta * low_normals, axis=1))
+        <= low_width + high_length * normal_tangent
+        + high_width * normal_normal + tolerance
     )
-    segment = points[index + 1] - points[index]
-    length = float(arc[index + 1] - arc[index])
-    tangent = segment / length
-    ratio = (target - arc[index]) / length
-    return points[index] + ratio * segment, tangent
 
 
-def _vehicle_axes(heading):
-    tangent = np.asarray([math.cos(heading), math.sin(heading)])
-    normal = np.asarray([-tangent[1], tangent[0]])
-    return tangent, normal
-
-
-def _path_heading(path, value):
-    tangent = tangent_at_s(path, float(value))
-    return float(math.atan2(tangent[1], tangent[0]))
+def _overlap_at_s(low_geometry, low_s, high_geometry, high_s, gap):
+    low_center, low_tangent = _path_states_at_s(
+        low_geometry['path'], low_geometry['pathS'], [low_s])
+    high_center, high_tangent = _path_states_at_s(
+        high_geometry['path'], high_geometry['pathS'], [high_s])
+    low_normal = np.column_stack((-low_tangent[:, 1], low_tangent[:, 0]))
+    high_normal = np.column_stack((-high_tangent[:, 1], high_tangent[:, 0]))
+    return bool(_overlap_pairs(
+        low_center, low_tangent, low_normal,
+        high_center, high_tangent, high_normal,
+        low_geometry['halfLength'] + gap,
+        low_geometry['halfWidth'],
+        high_geometry['halfLength'],
+        high_geometry['halfWidth'],
+    )[0])
