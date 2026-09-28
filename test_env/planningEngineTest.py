@@ -926,9 +926,16 @@ class PlanningEngine:
                 responseLaneIds = planner.feasibleLaneIds
                 responseJunctionLaneIds = planner.junctionLaneIds
 
+            responseWaypointWhole = self.vehicleWaypointWholeCaches.get(
+                vehicleId)
+            responsePath = (
+                responseWaypointWhole.futurePath
+                if responseWaypointWhole is not None
+                else future_path[vehicleId]
+            )
             shortPathList, mergePathList = build_response_path_lists(
                 waypoints=waypointSparseResults[vehicleId],
-                planned_path=self.vehicleBasePathCaches[vehicleId],
+                planned_path=responsePath,
                 centerline_dict=responseCenterlines,
                 connector_dict=responseConnectors,
                 lane_ids=responseLaneIds,
