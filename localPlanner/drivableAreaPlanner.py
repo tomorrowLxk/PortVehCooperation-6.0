@@ -62,6 +62,21 @@ class DrivableAreaPlanner:
         lane_ids = list(referLaneIds)
         route = np.asarray(referLine, dtype=float)[:, :2].copy()
         forbidden = set(forbiddenLaneIds or [])
+
+        # 新任务可能恰好从首条车道末端开始。此时该车道在route起点之后
+        # 已无有效长度，应让其直接下游route车道成为可行域搜索起点。
+        while len(lane_ids) > 1:
+            first_line = np.asarray(
+                centerline_dict[lane_ids[0]], dtype=float
+            )[:, :2]
+            first_s = self._project_to_line(route[0], first_line)[0]
+            first_length = float(np.linalg.norm(
+                np.diff(first_line, axis=0), axis=1
+            ).sum())
+            if first_length - first_s > 1e-6:
+                break
+            lane_ids.pop(0)
+
         normalized_connectors = {}
         for lane_id, source in connector_dict.items():
             info = dict(source)
@@ -738,7 +753,7 @@ class DrivableAreaPlanner:
                             * FEASIBLE_DOMAIN_LANE_CHANGE_DISTANCE
                         )
 
-                    if end_s <= start_s:
+                    if end_s - start_s <= 1e-6:
                         newly_removed.add((index, lane))
                         continue
 
