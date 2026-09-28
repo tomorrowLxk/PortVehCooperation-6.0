@@ -26,6 +26,9 @@ from parameters import (
 )
 
 
+_TERMINAL_STOP_SPEED_THRESHOLD = 0.1
+
+
 @dataclass(frozen=True)
 class WaypointWhole:
     """一辆车本轮实际准备执行的候选点前缀及其时间、速度。"""
@@ -367,6 +370,7 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
         node_s = np.asarray([0.0])
         node_xy = raw[:, :2].copy()
         candidate_nodes = np.asarray([0], dtype=int)
+        motion_end = 0.0
     else:
         raw[:, 2] = np.clip(raw[:, 2], 0.0, source_s[-1])
         motion_end = float(raw[-1, 2])
@@ -392,6 +396,10 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
         'nodeXY': node_xy,
         'candidateNodes': candidate_nodes,
         'speedLimits': np.maximum(0.0, limits),
+        'terminalStop': bool(
+            source_limits[-1] <= 1e-9
+            and motion_end >= source_s[-1] - 1e-3
+        ),
     }
     prepared['spatialGeometry'] = _prepare_spatial_geometry(
         path, source_s, prepared['candidateS'], static, dynamic)
@@ -862,11 +870,25 @@ def _build_whole(
         prepared, speed_limits, static, dynamic,
         conflict_segments, stopped=False):
     node_s = prepared['nodeS']
-    speeds, segment_speeds, times = _motion_profile(
-        node_s, speed_limits, static, dynamic, stopped)
     nodes = prepared['candidateNodes']
     points = prepared['candidates'][:, :2].copy()
     candidate_s = prepared['candidateS'].copy()
+    terminal_stop = bool(
+        stopped
+        or (len(speed_limits) > 0 and float(speed_limits[-1]) <= 1e-9)
+        or prepared['terminalStop']
+    )
+    effective_speed_limits = np.asarray(speed_limits, dtype=float).copy()
+    if terminal_stop and len(effective_speed_limits):
+        effective_speed_limits[-1] = 0.0
+    speeds, segment_speeds, times = _motion_profile(
+        node_s, effective_speed_limits, static, dynamic, terminal_stop)
+    if (not terminal_stop and len(speeds)
+            and float(speeds[-1]) < _TERMINAL_STOP_SPEED_THRESHOLD):
+        terminal_stop = True
+        effective_speed_limits[-1] = 0.0
+        speeds, segment_speeds, times = _motion_profile(
+            node_s, effective_speed_limits, static, dynamic, True)
     arrival = times[nodes]
     point_speeds = speeds[nodes]
     if len(nodes) > 1:
@@ -883,6 +905,10 @@ def _build_whole(
     else:
         output_segment_speeds = np.empty(0, dtype=float)
     terminal_speed = float(point_speeds[-1]) if len(point_speeds) else 0.0
+    if terminal_stop:
+        terminal_speed = 0.0
+        if len(point_speeds):
+            point_speeds[-1] = 0.0
     return WaypointWhole(
         vehicleId=prepared['vehicleId'],
         points=points,
@@ -891,14 +917,14 @@ def _build_whole(
         segmentSpeeds=output_segment_speeds,
         pointSpeeds=point_speeds,
         terminalSpeed=terminal_speed,
-        stopped=bool(stopped or terminal_speed <= 1e-9),
+        stopped=terminal_stop,
         conflictPointSegments=tuple(conflict_segments),
         futurePath=prepared['futurePath'],
         motionS=node_s.copy(),
         motionTimes=times,
         motionPointSpeeds=speeds,
         motionSegmentSpeeds=segment_speeds,
-        motionSpeedLimits=np.asarray(speed_limits, dtype=float).copy(),
+        motionSpeedLimits=effective_speed_limits,
         candidateNodeIndices=nodes.copy(),
     )
 
@@ -927,6 +953,7 @@ def _motion_profile(node_s, speed_limits, static, dynamic, stopped):
             float(static['maxAcceleration']),
             float(static['maxDeceleration']),
         )
+        speeds[np.asarray(speed_limits, dtype=float) <= 1e-9] = 0.0
         segment_speeds = 0.5 * (speeds[:-1] + speeds[1:])
         durations = np.divide(
             distances,
