@@ -178,11 +178,6 @@ def _find_turn_lanes(lane_ids, route, centerlines, threshold):
     return turns
 
 
-def _find_last_turn_lane(lane_ids, route, centerlines, threshold):
-    turns = _find_turn_lanes(lane_ids, route, centerlines, threshold)
-    return turns[0] if turns else None
-
-
 def _map_supported_scheme(turn, lane_ids, connectors, centerlines, threshold):
     """仅根据目标出口的其他前驱转向类型选择方案，不复用其几何。"""
     turn_index, turn_lane_id, _, theta0, theta1 = turn
@@ -471,17 +466,6 @@ def _append_unique(info, field, lane_id):
 
 def _lane_list(values):
     return [str(value) for value in (values or []) if value is not None]
-
-
-def _point_at_s(line, target_s):
-    line = np.asarray(line, dtype=float)[:, :2]
-    segment_lengths = np.linalg.norm(np.diff(line, axis=0), axis=1)
-    cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
-    target = float(np.clip(target_s, 0.0, cumulative[-1]))
-    index = min(int(np.searchsorted(cumulative, target, side="right") - 1), len(line) - 2)
-    length = segment_lengths[index]
-    ratio = 0.0 if length <= 1e-12 else (target - cumulative[index]) / length
-    return line[index] + ratio * (line[index + 1] - line[index])
 
 
 def _polyline_length(line):
