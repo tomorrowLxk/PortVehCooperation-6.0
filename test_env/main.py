@@ -16,7 +16,7 @@ from test_env.simulation import (
 
 
 VISUALIZATION = True
-VISUALIZE_GRAPH_SEARCH_RESULTS = True
+VISUALIZE_GRAPH_SEARCH_RESULTS = False
 VISUALIZE_ONLY_FIRST_GRAPH_SEARCH_RESULT = True
 PRINT_COOPERATION_BLOCKS = True
 PRINT_FULL_RESPONSES = False
@@ -52,7 +52,7 @@ responses = []
 print(f'=== {scenario.name} ===')
 print(f'scenario={scenario.sourceFile}')
 print(f'vehicles={tuple(vehicles)}, dt={scenario.simulationDt:.2f}s, planningPeriod={scenario.planningPeriod:.2f}s')
-
+import time
 
 # 二、显式闭环循环：规划和仿真步进都在main.py中，便于逐帧调试。
 for stepIndex in range(maxSteps):
@@ -72,6 +72,7 @@ for stepIndex in range(maxSteps):
         longRouteResult = scenario.build_long_route_result(activeRequests)
 
         # 2. 调用一次5.0测试版batchRoutePlan，所有上游数据显式可见。
+        t1 = time.time()
         responses = planningEngine.batchRoutePlan(
             activeRequests,
             allVehicleStates=allVehicleStates,
@@ -84,6 +85,7 @@ for stepIndex in range(maxSteps):
             laneSignal_zy=signalController.states,
             longRouteResult=longRouteResult,
         )
+        print((time.time()-t1)*1000)
 
         # 3. 输出本帧规划摘要，并将response直接下发给对应仿真车辆。
         print(f'[planning t={simulationTime:.1f}s]')

@@ -425,10 +425,10 @@ class SimulationVisualizer:
             for routeData in scenario.routes.values()
         ])
         self.viewLimits = (
-            float(np.min(routePoints[:, 0])) - 20.0,
-            float(np.max(routePoints[:, 0])) + 20.0,
-            float(np.min(routePoints[:, 1])) - 20.0,
-            float(np.max(routePoints[:, 1])) + 20.0,
+            float(np.min(routePoints[:, 0])) - 50.0,
+            float(np.max(routePoints[:, 0])) + 50.0,
+            float(np.min(routePoints[:, 1])) - 50.0,
+            float(np.max(routePoints[:, 1])) + 50.0,
         )
         self.stopRequested = False
         self.figure = None

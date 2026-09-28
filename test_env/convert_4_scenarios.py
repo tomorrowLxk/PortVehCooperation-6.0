@@ -7,7 +7,7 @@ import re
 
 
 SOURCE_ROOT = Path(
-    r'G:\项目\港口车辆运动规划\PortVehCooperation 4.0\demoTest'
+    r'G:\项目\港口车辆运动规划\PortVehCooperation 4.0\demoTest\两车碾压'
 )
 SOURCE_MAP_ROOT = Path(
     r'G:\项目\港口车辆运动规划\PortVehCooperation 4.0\staticMap'

@@ -31,7 +31,7 @@
       },
       "staticInfo": {
         "lengthMeters": 14.8,
-        "widthMeters": 2.8,
+        "widthMeters": 1.8,
         "maxSpeedMps": 9.77,
         "maxAccelerationMps2": 2.0,
         "maxDecelerationMps2": -4.0,
@@ -593,7 +593,7 @@
       },
       "staticInfo": {
         "lengthMeters": 14.8,
-        "widthMeters": 2.8,
+        "widthMeters": 1.8,
         "maxSpeedMps": 9.77,
         "maxAccelerationMps2": 2.0,
         "maxDecelerationMps2": -4.0,

@@ -45,7 +45,7 @@
         "speedLimitMps": 4.166666666666667,
         "forbidLaneIdList": [],
         "laneWhiteList": [],
-        "allowReverse": false,
+        "allowReverse": true,
         "commandId": "demo-command-1",
         "requestId": "demo-request-1"
       },
