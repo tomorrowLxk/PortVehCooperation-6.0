@@ -319,12 +319,8 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
         new_whole.motionS[new_whole.motionS <= common_length + 1e-9],
         common_length,
     ])
-    old_times = np.asarray([
-        aligned_old.time_at_s(value) for value in sample_s
-    ])
-    new_times = np.asarray([
-        new_whole.time_at_s(value) for value in sample_s
-    ])
+    old_times, _ = _whole_states_at_s(aligned_old, sample_s)
+    new_times, _ = _whole_states_at_s(new_whole, sample_s)
     if np.any(np.isfinite(old_times) != np.isfinite(new_times)):
         return True
     finite = np.isfinite(old_times) & np.isfinite(new_times)
@@ -557,20 +553,20 @@ def _build_candidate_constraints(prepared, accepted, accepted_geometry):
             high_whole.stopped,
             COOPERATION_STATIC_GAP,
         )
-        for sample_index in np.flatnonzero(np.isfinite(conflict_s)):
+        conflict_indices = np.flatnonzero(np.isfinite(conflict_s))
+        conflict_times, conflict_speeds = _whole_states_at_s(
+            high_whole, conflict_s[conflict_indices])
+        conflict_times += COOPERATION_TIME_CLEARANCE
+        conflict_times[blocked_mask[conflict_indices]] = np.inf
+        for position, sample_index in enumerate(conflict_indices):
             value = float(low_geometry['sampleS'][sample_index])
             left = int(low_geometry['leftCandidate'][sample_index])
             right = int(low_geometry['rightCandidate'][sample_index])
             start_s = float(low_geometry['segmentStartS'][sample_index])
             end_s = float(low_geometry['segmentEndS'][sample_index])
-            high_s = float(conflict_s[sample_index])
             blocked = bool(blocked_mask[sample_index])
-            high_speed = high_whole.speed_at_s(high_s)
-            required_time = (
-                float('inf') if blocked
-                else high_whole.time_at_s(high_s)
-                + COOPERATION_TIME_CLEARANCE
-            )
+            high_speed = float(conflict_speeds[position])
+            required_time = float(conflict_times[position])
             if blocked or high_speed <= 1e-9:
                 left_required = required_time
                 right_required = required_time
@@ -623,6 +619,27 @@ def _build_candidate_constraints(prepared, accepted, accepted_geometry):
         'segments': tuple(segments),
         'aebChecks': tuple(aeb_checks),
     }
+
+
+def _whole_states_at_s(whole, values):
+    targets = np.asarray(values, dtype=float)
+    if len(whole.motionSegmentSpeeds) == 0:
+        return (
+            np.zeros(len(targets), dtype=float),
+            np.full(len(targets), whole.terminalSpeed, dtype=float),
+        )
+
+    targets = np.clip(targets, whole.motionS[0], whole.motionS[-1])
+    indices = np.searchsorted(whole.motionS, targets, side='right') - 1
+    indices = np.clip(indices, 0, len(whole.motionSegmentSpeeds) - 1)
+    speeds = whole.motionSegmentSpeeds[indices]
+    times = whole.motionTimes[indices] + np.divide(
+        targets - whole.motionS[indices],
+        speeds,
+        out=np.full(len(targets), np.inf, dtype=float),
+        where=speeds > 1e-9,
+    )
+    return times, speeds
 
 
 def _maximum_optional(current, value):
