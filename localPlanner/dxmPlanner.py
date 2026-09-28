@@ -42,7 +42,7 @@ def fixed_dxm(
     地图车道只用于选择方案，不复用其中心线生成临时车道。
     """
     lane_ids = [str(lane_id) for lane_id in (vehLaneID or []) if lane_id is not None]
-    route = _valid_line(vehRoute, "vehRoute")
+    route = np.asarray(vehRoute, dtype=float)[:, :2].copy()
     if not lane_ids:
         raise ValueError("调箱门route缺少laneId")
     if spacing <= 0.0 or not math.isfinite(float(spacing)):
@@ -50,9 +50,8 @@ def fixed_dxm(
 
     new_connector = {str(k): deepcopy(dict(v)) for k, v in connector_dict.items()}
     new_centerlines = {
-        str(k): _valid_line(v, f"centerline[{k}]").copy()
+        str(k): np.asarray(v, dtype=float)[:, :2].copy()
         for k, v in centerline_dict.items()
-        if v is not None
     }
 
     turns = _find_turn_lanes(
@@ -472,16 +471,6 @@ def _append_unique(info, field, lane_id):
 
 def _lane_list(values):
     return [str(value) for value in (values or []) if value is not None]
-
-
-def _valid_line(value, name):
-    array = np.asarray(value, dtype=float)
-    if array.ndim != 2 or array.shape[0] < 2 or array.shape[1] < 2:
-        raise ValueError(f"{name}必须是至少包含两个xy点的二维数组")
-    array = array[:, :2]
-    if not np.all(np.isfinite(array)):
-        raise ValueError(f"{name}包含非有限坐标")
-    return array
 
 
 def _point_at_s(line, target_s):
