@@ -43,6 +43,7 @@ from parameters import (
     PATH_OUTPUT_POINT_SPACING,
     PATH_REFERENCE_WEIGHT,
     PATH_STATIC_STOP_DISTANCE,
+    REVERSE_POINT_LOCATE_TOLERANCE,
 )
 
 
@@ -496,9 +497,21 @@ def _build_graph(
         ranked = []
         for line_index, metric in enumerate(line_metrics):
             projection = metric.project(reverse)
+            residual = reverse - projection["point"]
+            along = float(np.dot(residual, projection["tangent"]))
+            if ((projection["s"] >= metric.total - 1e-6
+                 and along > 1e-6)
+                    or (projection["s"] <= 1e-6 and along < -1e-6)):
+                continue
+            if projection["distance"] > REVERSE_POINT_LOCATE_TOLERANCE:
+                continue
+            if projection["s"] <= current_projections[line_index]["s"] + 1e-6:
+                continue
+            if interval_contains(blocked[line_index], projection["s"]):
+                continue
             ranked.append((projection["distance"], line_index, projection))
-        _, line_index, projection = min(ranked)
-        if not interval_contains(blocked[line_index], projection["s"]):
+        if ranked:
+            _, line_index, projection = min(ranked)
             reference_projection = reference_metric.project(reverse)
             reverse_id = _add_node(
                 nodes, node_keys, line_nodes, line_index,

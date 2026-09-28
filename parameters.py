@@ -13,6 +13,7 @@ HV_DESTINATION_DISTANCE_THRESHOLD = 2.0  # HV当前位置到长路径终点的�
 
 REVERSE_POINT_REACH_TOLERANCE = 1.5  # 调箱门车辆到倒车切换点的到达判定距离，单位m
 REVERSE_POINT_STOP_SPEED = 0.2  # 调箱门车辆通过倒车切换点前要求达到的停车速度，单位m/s
+REVERSE_POINT_LOCATE_TOLERANCE = 3.0  # R点匹配当前局部可行域线的最大距离，单位m
 DXM_TURN_LANE_THRESHOLD_DEG = 75.0  # 车道首尾方向差达到该角度时视为转弯车道，单位deg
 DXM_ROUTE_POINT_SPACING = 2.0  # 调箱门新增车道中心线的目标点间距，单位m
 DXM_REVERSE_SEARCH_MIN_STEP = 5.0  # 搜索倒车切换点时每次增加的最小距离，单位m
