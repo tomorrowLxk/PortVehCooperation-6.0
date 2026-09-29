@@ -578,6 +578,7 @@ def _build_graph(
                 and heading_error <= math.radians(1.0)):
             geometry = line_metrics[current_line].slice(
                 current_start_s, target_s)
+            geometry[0] = current
         else:
             geometry = hermite_connector(
                 current, current_heading,
