@@ -465,14 +465,22 @@ def _build_graph(
                 ))
 
         for obstacle_index, interval in enumerate(blocked[line_index]):
-            if any(
-                    segment.isJunction
-                    and segment.startS + 1e-6 < interval.startS
-                    < segment.endS - 1e-6
-                    for segment in lane_segments):
-                continue
+            stop_s = float(interval.startS)
+            junction_segment = next((
+                segment for segment in lane_segments
+                if segment.isJunction
+                and segment.startS + 1e-6 < interval.startS
+                < segment.endS - 1e-6
+            ), None)
+            if junction_segment is not None:
+                if line_start_s < junction_segment.startS - 1e-6:
+                    stop_s = float(junction_segment.startS)
+                elif line_start_s < junction_segment.endS - 1e-6:
+                    stop_s = float(line_start_s)
+                else:
+                    continue
             specifications.append((
-                float(interval.startS), {"T"}, f"T{obstacle_index}"))
+                stop_s, {"T"}, f"T{obstacle_index}"))
 
         if not interval_contains(blocked[line_index], total):
             specifications.append((total, {"G"}, "G"))
