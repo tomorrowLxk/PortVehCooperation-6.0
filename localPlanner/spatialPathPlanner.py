@@ -479,6 +479,10 @@ def _build_graph(
                     stop_s = float(line_start_s)
                 else:
                     continue
+            if (line_index == current_line
+                    and stop_s <= line_start_s + 1e-6):
+                nodes["S"].roles.add("T")
+                continue
             specifications.append((
                 stop_s, {"T"}, f"T{obstacle_index}"))
 
