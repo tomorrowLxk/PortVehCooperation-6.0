@@ -798,6 +798,49 @@ def _add_edge(
     adjacency[source_id].append(edge_id)
 
 
+def _same_line_baseline_path(graph, terminal, dynamic_info):
+    """Independently build S-to-P Hermite plus P-to-terminal baseline."""
+    current_line = graph.currentLine
+    metric = graph.lineMetrics[current_line]
+    current_node = graph.nodes["S"]
+    current = current_node.point
+    start_s = current_node.lineS[current_line]
+    end_s = terminal.lineS[current_line]
+    current_heading = float(dynamic_info.get("heading", 0.0))
+    projected_start, line_headings = metric.values_at([start_s])
+    heading_error = abs(math.atan2(
+        math.sin(current_heading - line_headings[0]),
+        math.cos(current_heading - line_headings[0]),
+    ))
+    if (np.linalg.norm(projected_start[0] - current) <= 1e-6
+            and heading_error <= math.radians(1.0)):
+        result = metric.slice(start_s, end_s)
+        result[0] = current
+        return result
+
+    forward_p_nodes = sorted(
+        [
+            (node.lineS[current_line], node)
+            for node in graph.nodes.values()
+            if node.id != "S"
+            and "P" in node.roles
+            and current_line in node.lineS
+            and start_s + 1e-6 < node.lineS[current_line]
+            < end_s - 1e-6
+        ],
+        key=lambda item: item[0],
+    )
+    anchor = forward_p_nodes[0][1] if forward_p_nodes else terminal
+    anchor_s = anchor.lineS[current_line]
+    first = hermite_connector(
+        current, current_heading,
+        anchor.point, anchor.headings[current_line],
+        PATH_CURVE_SAMPLE_SPACING,
+    )
+    remainder = metric.slice(anchor_s, end_s)
+    return append_polyline(first, remainder)
+
+
 def _strict_candidates(
         graph, target_id, reference, polygons, static_info, dynamic_info):
     collision_pairs = set()
@@ -811,7 +854,8 @@ def _strict_candidates(
         start_s = graph.nodes["S"].lineS[current_line]
         end_s = terminal.lineS[current_line]
         if end_s > start_s + 1e-9:
-            path = graph.lineMetrics[current_line].slice(start_s, end_s)
+            path = _same_line_baseline_path(
+                graph, terminal, dynamic_info)
             collision = path_vehicle_intersects(
                 path, polygons,
                 static_info["length"], static_info["width"],
@@ -832,9 +876,12 @@ def _strict_candidates(
                     ),
                     key=lambda item: item[0],
                 )
-                safe_node_paths[signature] = clean_xy(np.asarray([
-                    point for _, point in ordered_nodes
-                ], dtype=float))
+                safe_node_paths[signature] = clean_xy(np.vstack((
+                    graph.nodes["S"].point,
+                    np.asarray([
+                        point for _, point in ordered_nodes
+                    ], dtype=float),
+                )))
                 maximum = float(np.max(path_curvatures(
                     path, PATH_CURVATURE_WINDOW
                 ))) if len(path) > 2 else 0.0
