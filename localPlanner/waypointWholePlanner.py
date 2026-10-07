@@ -39,6 +39,18 @@ def _unique_sorted_values(values):
         np.diff(ordered) > _ARC_LENGTH_MERGE_TOLERANCE,
     ]]
 
+
+def _nearest_sorted_indices(values, queries):
+    values = np.asarray(values, dtype=float)
+    queries = np.asarray(queries, dtype=float)
+    right = np.minimum(np.searchsorted(values, queries), len(values) - 1)
+    left = np.maximum(right - 1, 0)
+    use_left = (
+        np.abs(queries - values[left])
+        <= np.abs(values[right] - queries)
+    )
+    return np.where(use_left, left, right).astype(int)
+
 @dataclass(frozen=True)
 class WaypointWhole:
     """一辆车本轮实际准备执行的候选点前缀及其时间、速度。"""
@@ -291,9 +303,7 @@ def align_old_waypoint_whole(old_whole, current_position):
         )
     else:
         segment_speeds = np.empty(0, dtype=float)
-    candidate_nodes = np.searchsorted(
-        motion_s, future_path_s, side='left')
-    candidate_nodes = np.minimum(candidate_nodes, len(motion_s) - 1)
+    candidate_nodes = _nearest_sorted_indices(motion_s, future_path_s)
 
     return WaypointWhole(
         vehicleId=old_whole.vehicleId,
@@ -393,7 +403,8 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
             np.interp(node_s, source_s, path[:, 0]),
             np.interp(node_s, source_s, path[:, 1]),
         ))
-        candidate_nodes = np.searchsorted(node_s, raw[:, 2])
+        candidate_nodes = _nearest_sorted_indices(node_s, raw[:, 2])
+
 
     limits = np.interp(node_s, source_s, source_limits)
     limits = np.minimum(limits, float(static['maxSpeed']))
