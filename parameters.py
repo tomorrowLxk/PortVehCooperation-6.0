@@ -83,6 +83,7 @@ PATH_SEARCH_VALIDATION_BATCH_SIZE = 4  # 每轮懒验证最多检查的内部候
 PATH_MAX_SIGNATURES_PER_NODE = 8  # 每个图节点最多保留的不同分支序列数量
 PATH_MAX_GRAPH_ITERATIONS = 32  # 懒验证删除无效边后允许重新搜索当前终点的最大轮数
 PATH_REFERENCE_WEIGHT = 1.0  # 4.0占位选优中全局长路径横向偏差的权重
+PATH_LANE_CHANGE_PENALTY = 2.0  # 每次跨可行域线换道叠加的等效距离代价，单位m
 VEHICLE_MAX_LATERAL_ACCELERATION = 0.3  # 依据曲率计算速度上限时允许的最大横向加速度，单位m/s²
 TRAFFIC_SIGNAL_MATCH_DISTANCE = 5.0  # path与进口道末端匹配的最大距离，单位m
 TRAFFIC_SIGNAL_STOP_DISTANCE = 5.0  # 信控停车位置相对进口道末端的上游距离，单位m

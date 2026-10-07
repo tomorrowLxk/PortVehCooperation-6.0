@@ -32,6 +32,7 @@ from parameters import (
     PATH_G0_LATERAL_TOLERANCE,
     PATH_GRAPH_START_OFFSET,
     PATH_LANE_CHANGE_LONGITUDINAL_RATIO,
+    PATH_LANE_CHANGE_PENALTY,
     PATH_LATERAL_SAFETY_MARGIN,
     PATH_MAX_CANDIDATES,
     PATH_MAX_GRAPH_ITERATIONS,
@@ -355,7 +356,18 @@ def select_optimal_paths(candidates, reference_line):
         length = float(np.sum(np.linalg.norm(
             np.diff(path, axis=0), axis=1)))
         curvature = float(candidate.maxCurvature)
-        score = length + PATH_REFERENCE_WEIGHT * lateral
+        laneChanges = sum(
+            sourceLine != targetLine
+            for sourceLine, targetLine in zip(
+                candidate.lineSequence[:-1],
+                candidate.lineSequence[1:],
+            )
+        )
+        score = (
+            length
+            + PATH_REFERENCE_WEIGHT * lateral
+            + PATH_LANE_CHANGE_PENALTY * laneChanges
+        )
         value = PathCandidate(
             path, score, candidate.lineSequence, curvature,
             candidate.terminalStop, candidate.terminalReason,
@@ -777,6 +789,8 @@ def _add_edge(
         )
     cost += PATH_REFERENCE_WEIGHT * 0.5 * (
         source.lateral + target.lateral)
+    if kind == "CROSS":
+        cost += PATH_LANE_CHANGE_PENALTY
     edges[edge_id] = _Edge(
         edge_id, source_id, target_id, source_line, target_line,
         kind, geometry, "UNKNOWN", 0.0, cost,

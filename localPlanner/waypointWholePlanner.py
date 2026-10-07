@@ -27,7 +27,17 @@ from parameters import (
 
 
 _TERMINAL_STOP_SPEED_THRESHOLD = 0.1
+_ARC_LENGTH_MERGE_TOLERANCE = 1e-6
 
+
+def _unique_sorted_values(values):
+    ordered = np.sort(np.asarray(values, dtype=float))
+    if len(ordered) <= 1:
+        return ordered
+    return ordered[np.r_[
+        True,
+        np.diff(ordered) > _ARC_LENGTH_MERGE_TOLERANCE,
+    ]]
 
 @dataclass(frozen=True)
 class WaypointWhole:
@@ -316,7 +326,7 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
         return True
 
     common_length = min(old_length, new_length)
-    sample_s = np.unique(np.r_[
+    sample_s = _unique_sorted_values(np.r_[
         0.0,
         aligned_old.motionS[aligned_old.motionS <= common_length + 1e-9],
         new_whole.motionS[new_whole.motionS <= common_length + 1e-9],
@@ -374,7 +384,7 @@ def _prepare_motion(vehicle_id, future_path, candidates, static, dynamic):
     else:
         raw[:, 2] = np.clip(raw[:, 2], 0.0, source_s[-1])
         motion_end = float(raw[-1, 2])
-        node_s = np.unique(np.r_[
+        node_s = _unique_sorted_values(np.r_[
             0.0,
             source_s[source_s <= motion_end + 1e-9],
             raw[:, 2],
