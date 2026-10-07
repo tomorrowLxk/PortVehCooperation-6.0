@@ -42,6 +42,7 @@ from parameters import (
     PATH_OBSTACLE_REAR_CLEARANCE,
     PATH_OUTPUT_POINT_SPACING,
     PATH_REFERENCE_WEIGHT,
+    PATH_SEARCH_VALIDATION_BATCH_SIZE,
     PATH_STATIC_STOP_DISTANCE,
     REVERSE_POINT_LOCATE_TOLERANCE,
 )
@@ -789,6 +790,55 @@ def _strict_candidates(
     curvature_pairs = set()
     accepted = {}
     safe_node_paths = {}
+
+    current_line = graph.currentLine
+    terminal = graph.nodes[target_id]
+    if current_line in terminal.lineS:
+        start_s = graph.nodes["S"].lineS[current_line]
+        end_s = terminal.lineS[current_line]
+        if end_s > start_s + 1e-9:
+            path = graph.lineMetrics[current_line].slice(start_s, end_s)
+            collision = path_vehicle_intersects(
+                path, polygons,
+                static_info["length"], static_info["width"],
+                dynamic_info.get("longitudinalUncertainty", 0.0),
+                dynamic_info.get("lateralUncertainty", 0.0),
+                PATH_LATERAL_SAFETY_MARGIN,
+                PATH_COLLISION_SAMPLE_SPACING,
+            )
+            if not collision:
+                signature = (current_line,)
+                ordered_nodes = sorted(
+                    (
+                        (node.lineS[current_line], node.point)
+                        for node in graph.nodes.values()
+                        if current_line in node.lineS
+                        and start_s - 1e-9 <= node.lineS[current_line]
+                        <= end_s + 1e-9
+                    ),
+                    key=lambda item: item[0],
+                )
+                safe_node_paths[signature] = clean_xy(np.asarray([
+                    point for _, point in ordered_nodes
+                ], dtype=float))
+                maximum = float(np.max(path_curvatures(
+                    path, PATH_CURVATURE_WINDOW
+                ))) if len(path) > 2 else 0.0
+                limit = (
+                    PATH_CURVATURE_TOLERANCE
+                    / max(float(static_info["minTurningRadius"]), 1e-6)
+                )
+                if maximum <= limit + 1e-9:
+                    sampled = resample_polyline(
+                        path, PATH_OUTPUT_POINT_SPACING)
+                    scored_curvature = float(np.max(path_curvatures(
+                        sampled, PATH_CURVATURE_WINDOW
+                    ))) if len(sampled) > 2 else 0.0
+                    accepted[signature] = PathCandidate(
+                        sampled, 0.0, signature, scored_curvature,
+                    )
+
+    baseline_available = bool(accepted)
     for _ in range(PATH_MAX_GRAPH_ITERATIONS):
         paths = _search(
             graph, target_id, collision_pairs, curvature_pairs)
@@ -862,8 +912,12 @@ def _strict_candidates(
             ))
 
         for candidate in valid:
+            if len(accepted) >= PATH_MAX_CANDIDATES:
+                break
             accepted.setdefault(candidate.lineSequence, candidate)
         if len(accepted) >= PATH_MAX_CANDIDATES:
+            break
+        if baseline_available:
             break
         if not changed:
             break
@@ -883,7 +937,7 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
     serial = 1
     best = {}
     results = {}
-    result_limit = PATH_MAX_CANDIDATES
+    result_limit = PATH_SEARCH_VALIDATION_BATCH_SIZE
     settled_signatures_per_node = {}
     pair_sensitive = bool(collision_pairs or curvature_pairs)
     while queue:

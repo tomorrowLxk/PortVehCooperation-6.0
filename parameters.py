@@ -79,6 +79,7 @@ PATH_STATIC_STOP_DISTANCE = 6.0  # polygon上游T点要求的车头静态停车�
 PATH_OBSTACLE_REAR_CLEARANCE = 12.0  # polygon下游恢复P节点前的额外清理距离，单位m
 PATH_G0_LATERAL_TOLERANCE = 1.0  # G末端到全局长路径横向距离小于该值时视为长路径G，单位m
 PATH_MAX_CANDIDATES = 3  # 每辆车空间规划最多保留多少条不同同伦类的候选 path
+PATH_SEARCH_VALIDATION_BATCH_SIZE = 4  # 每轮懒验证最多检查的内部候选path数量，不改变最终输出数量
 PATH_MAX_SIGNATURES_PER_NODE = 8  # 每个图节点最多保留的不同分支序列数量
 PATH_MAX_GRAPH_ITERATIONS = 32  # 懒验证删除无效边后允许重新搜索当前终点的最大轮数
 PATH_REFERENCE_WEIGHT = 1.0  # 4.0占位选优中全局长路径横向偏差的权重
