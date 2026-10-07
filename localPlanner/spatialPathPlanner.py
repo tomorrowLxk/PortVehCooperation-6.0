@@ -798,8 +798,8 @@ def _add_edge(
     adjacency[source_id].append(edge_id)
 
 
-def _same_line_baseline_path(graph, terminal, dynamic_info):
-    """Independently build S-to-P Hermite plus P-to-terminal baseline."""
+def _same_line_baseline_paths(graph, terminal, dynamic_info):
+    """Build independent same-line S-P-G candidates without graph search."""
     current_line = graph.currentLine
     metric = graph.lineMetrics[current_line]
     current_node = graph.nodes["S"]
@@ -814,32 +814,44 @@ def _same_line_baseline_path(graph, terminal, dynamic_info):
     ))
     if (np.linalg.norm(projected_start[0] - current) <= 1e-6
             and heading_error <= math.radians(1.0)):
-        result = metric.slice(start_s, end_s)
-        result[0] = current
-        return result
+        path = metric.slice(start_s, end_s)
+        path[0] = current
+        return [(path, clean_xy(np.vstack((current, terminal.point))))]
 
-    forward_p_nodes = sorted(
+    anchors = sorted(
         [
-            (node.lineS[current_line], node)
+            node
             for node in graph.nodes.values()
             if node.id != "S"
             and "P" in node.roles
             and current_line in node.lineS
             and start_s + 1e-6 < node.lineS[current_line]
             < end_s - 1e-6
+            and node.lineS[current_line] - start_s
+            <= PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE + 1e-6
         ],
-        key=lambda item: item[0],
+        key=lambda node: node.lineS[current_line],
     )
-    anchor = forward_p_nodes[0][1] if forward_p_nodes else terminal
-    anchor_s = anchor.lineS[current_line]
-    first = hermite_connector(
-        current, current_heading,
-        anchor.point, anchor.headings[current_line],
-        PATH_CURVE_SAMPLE_SPACING,
-    )
-    remainder = metric.slice(anchor_s, end_s)
-    return append_polyline(first, remainder)
+    if not anchors:
+        anchors = [terminal]
 
+    candidates = []
+    for anchor in anchors:
+        anchor_s = anchor.lineS[current_line]
+        first = hermite_connector(
+            current, current_heading,
+            anchor.point, anchor.headings[current_line],
+            PATH_CURVE_SAMPLE_SPACING,
+        )
+        remainder = metric.slice(anchor_s, end_s)
+        path = append_polyline(first, remainder)
+        node_path = clean_xy(np.vstack((
+            current,
+            anchor.point,
+            terminal.point,
+        )))
+        candidates.append((path, node_path))
+    return candidates
 
 def _strict_candidates(
         graph, target_id, reference, polygons, static_info, dynamic_info):
@@ -854,34 +866,28 @@ def _strict_candidates(
         start_s = graph.nodes["S"].lineS[current_line]
         end_s = terminal.lineS[current_line]
         if end_s > start_s + 1e-9:
-            path = _same_line_baseline_path(
-                graph, terminal, dynamic_info)
-            collision = path_vehicle_intersects(
-                path, polygons,
-                static_info["length"], static_info["width"],
-                dynamic_info.get("longitudinalUncertainty", 0.0),
-                dynamic_info.get("lateralUncertainty", 0.0),
-                PATH_LATERAL_SAFETY_MARGIN,
-                PATH_COLLISION_SAMPLE_SPACING,
-            )
-            if not collision:
-                signature = (current_line,)
-                ordered_nodes = sorted(
-                    (
-                        (node.lineS[current_line], node.point)
-                        for node in graph.nodes.values()
-                        if current_line in node.lineS
-                        and start_s - 1e-9 <= node.lineS[current_line]
-                        <= end_s + 1e-9
-                    ),
-                    key=lambda item: item[0],
+            safe_baselines = []
+            valid_baselines = []
+            for path, node_path in _same_line_baseline_paths(
+                    graph, terminal, dynamic_info):
+                collision = path_vehicle_intersects(
+                    path, polygons,
+                    static_info["length"], static_info["width"],
+                    dynamic_info.get("longitudinalUncertainty", 0.0),
+                    dynamic_info.get("lateralUncertainty", 0.0),
+                    PATH_LATERAL_SAFETY_MARGIN,
+                    PATH_COLLISION_SAMPLE_SPACING,
                 )
-                safe_node_paths[signature] = clean_xy(np.vstack((
-                    graph.nodes["S"].point,
-                    np.asarray([
-                        point for _, point in ordered_nodes
-                    ], dtype=float),
+                if collision:
+                    continue
+                length = float(np.sum(np.linalg.norm(
+                    np.diff(path, axis=0), axis=1)))
+                lateral = float(np.mean(np.abs(
+                    project_points_to_polyline(path, reference)["d"]
                 )))
+                score = length + PATH_REFERENCE_WEIGHT * lateral
+                safe_baselines.append((score, node_path))
+
                 maximum = float(np.max(path_curvatures(
                     path, PATH_CURVATURE_WINDOW
                 ))) if len(path) > 2 else 0.0
@@ -889,15 +895,28 @@ def _strict_candidates(
                     PATH_CURVATURE_TOLERANCE
                     / max(float(static_info["minTurningRadius"]), 1e-6)
                 )
-                if maximum <= limit + 1e-9:
-                    sampled = resample_polyline(
-                        path, PATH_OUTPUT_POINT_SPACING)
-                    scored_curvature = float(np.max(path_curvatures(
-                        sampled, PATH_CURVATURE_WINDOW
-                    ))) if len(sampled) > 2 else 0.0
-                    accepted[signature] = PathCandidate(
-                        sampled, 0.0, signature, scored_curvature,
-                    )
+                if maximum > limit + 1e-9:
+                    continue
+                sampled = resample_polyline(
+                    path, PATH_OUTPUT_POINT_SPACING)
+                scored_curvature = float(np.max(path_curvatures(
+                    sampled, PATH_CURVATURE_WINDOW
+                ))) if len(sampled) > 2 else 0.0
+                valid_baselines.append((
+                    score,
+                    PathCandidate(
+                        sampled, 0.0, (current_line,),
+                        scored_curvature,
+                    ),
+                ))
+
+            signature = (current_line,)
+            if safe_baselines:
+                safe_node_paths[signature] = min(
+                    safe_baselines, key=lambda item: item[0])[1]
+            if valid_baselines:
+                accepted[signature] = min(
+                    valid_baselines, key=lambda item: item[0])[1]
 
     baseline_available = bool(accepted)
     for _ in range(PATH_MAX_GRAPH_ITERATIONS):
