@@ -16,7 +16,6 @@ from localPlanner.pathCollision import (
 from localPlanner.pathGeometry import (
     append_polyline,
     clean_xy,
-    frenet_hermite_connector,
     frenet_connector,
     hermite_connector,
     path_curvatures,
@@ -100,7 +99,7 @@ class _Edge:
 class _Graph:
     lines: list[np.ndarray]
     lineMetrics: list
-    referenceLine: np.ndarray
+    referenceMetric: "_LineMetric"
     nodes: dict[str, _Node]
     edges: dict[int, _Edge]
     adjacency: dict[str, list[int]]
@@ -205,6 +204,80 @@ class _LineMetric:
         if end <= start + 1e-9:
             return boundaries[:1]
         return clean_xy(np.vstack((boundaries[0], middle, boundaries[1])))
+
+    def frenet_hermite_connector(
+            self, start, start_heading, start_reference_s,
+            end, end_heading, end_reference_s, spacing):
+        """使用当前已缓存的参考线几何量生成 Frenet-Hermite 连接线。"""
+        first = np.asarray(start, dtype=float)[:2]
+        last = np.asarray(end, dtype=float)[:2]
+        start_s = float(start_reference_s)
+        end_s = float(end_reference_s)
+        span = end_s - start_s
+        if span <= 1e-9:
+            return clean_xy(np.vstack((first, last)))
+
+        curvature_step = max(0.1, min(float(spacing), 0.5))
+        lower_start = max(0.0, start_s - curvature_step)
+        upper_start = min(self.total, start_s + curvature_step)
+        lower_end = max(0.0, end_s - curvature_step)
+        upper_end = min(self.total, end_s + curvature_step)
+        state_s = np.asarray([
+            start_s, lower_start, upper_start,
+            end_s, lower_end, upper_end,
+        ])
+        state_points, state_headings = self.values_at(state_s)
+
+        def endpoint_state(point, heading, offset, lower, upper):
+            reference_heading = state_headings[offset]
+            normal = np.asarray([
+                -math.sin(reference_heading), math.cos(reference_heading)])
+            lateral = float(np.dot(point - state_points[offset], normal))
+            if upper <= lower + 1e-9:
+                reference_curvature = 0.0
+            else:
+                heading_delta = math.atan2(
+                    math.sin(state_headings[offset + 2]
+                             - state_headings[offset + 1]),
+                    math.cos(state_headings[offset + 2]
+                             - state_headings[offset + 1]),
+                )
+                reference_curvature = heading_delta / (upper - lower)
+            relative_heading = math.atan2(
+                math.sin(float(heading) - reference_heading),
+                math.cos(float(heading) - reference_heading),
+            )
+            slope = (
+                (1.0 - reference_curvature * lateral)
+                * math.tan(relative_heading)
+            )
+            return lateral, slope
+
+        start_d, start_slope = endpoint_state(
+            first, start_heading, 0, lower_start, upper_start)
+        end_d, end_slope = endpoint_state(
+            last, end_heading, 3, lower_end, upper_end)
+
+        count = max(
+            3, int(math.ceil(span / max(float(spacing), 0.1))) + 1)
+        sample_s = np.linspace(start_s, end_s, count)
+        parameter = (sample_s - start_s) / span
+        h00 = 2.0 * parameter ** 3 - 3.0 * parameter ** 2 + 1.0
+        h10 = parameter ** 3 - 2.0 * parameter ** 2 + parameter
+        h01 = -2.0 * parameter ** 3 + 3.0 * parameter ** 2
+        h11 = parameter ** 3 - parameter ** 2
+        lateral = (
+            h00 * start_d
+            + h10 * span * start_slope
+            + h01 * end_d
+            + h11 * span * end_slope
+        )
+        bases, headings = self.values_at(sample_s)
+        normals = np.column_stack((-np.sin(headings), np.cos(headings)))
+        result = bases + lateral[:, None] * normals
+        result[0] = first
+        result[-1] = last
+        return resample_polyline(result, spacing)
 
 
 def plan_spatial_path(
@@ -666,7 +739,8 @@ def _build_graph(
                 )
 
     return _Graph(
-        lines, line_metrics, reference, nodes, edges, adjacency, goals, stops,
+        lines, line_metrics, reference_metric,
+        nodes, edges, adjacency, goals, stops,
         primary_line, current_line)
 
 
@@ -1130,12 +1204,11 @@ def _materialize_edge(graph, edge, dynamic_info=None):
             if edge.source == "S"
             else source.headings[edge.sourceLine]
         )
-        edge.geometry = frenet_hermite_connector(
+        edge.geometry = graph.referenceMetric.frenet_hermite_connector(
             source.point, source_heading,
             source.referenceS,
             target.point, target.headings[edge.targetLine],
             target.referenceS,
-            graph.referenceLine,
             PATH_CURVE_SAMPLE_SPACING,
         )
     return edge.geometry
