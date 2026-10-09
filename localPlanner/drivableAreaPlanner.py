@@ -40,6 +40,55 @@ class DrivableLine:
         return array.copy() if copy else array
 
 
+@dataclass(frozen=True)
+class _PolylineMetric:
+    """任务周期内保持不变的折线投影数据。"""
+    points: np.ndarray
+    segments: np.ndarray
+    segmentLengths: np.ndarray
+    segmentLengthsSquared: np.ndarray
+    cumulativeS: np.ndarray
+
+    @classmethod
+    def from_line(cls, line):
+        points = np.asarray(line, dtype=float)[:, :2]
+        segments = np.diff(points, axis=0)
+        lengths = np.linalg.norm(segments, axis=1)
+        return cls(
+            points=points,
+            segments=segments,
+            segmentLengths=lengths,
+            segmentLengthsSquared=lengths * lengths,
+            cumulativeS=np.concatenate(([0.0], np.cumsum(lengths))),
+        )
+
+    def project_many(self, query_points):
+        queries = np.asarray(query_points, dtype=float).reshape(-1, 2)
+        relative = queries[:, None, :] - self.points[:-1][None, :, :]
+        ratios = np.divide(
+            np.sum(relative * self.segments[None, :, :], axis=2),
+            self.segmentLengthsSquared[None, :],
+            out=np.zeros((len(queries), len(self.segments)), dtype=float),
+            where=self.segmentLengthsSquared[None, :] > 1e-12,
+        )
+        ratios = np.clip(ratios, 0.0, 1.0)
+        projections = (
+            self.points[:-1][None, :, :]
+            + ratios[:, :, None] * self.segments[None, :, :]
+        )
+        differences = projections - queries[:, None, :]
+        distances_squared = np.sum(differences * differences, axis=2)
+        indices = np.argmin(distances_squared, axis=1)
+        rows = np.arange(len(queries))
+        return (
+            self.cumulativeS[indices]
+            + ratios[rows, indices] * self.segmentLengths[indices],
+            np.sqrt(distances_squared[rows, indices]),
+        )
+
+    def mean_distance(self, query_points):
+        return float(np.mean(self.project_many(query_points)[1]))
+
 class DrivableAreaPlanner:
     "保存单车当前任务的完整可行域和跨帧位置匹配进度。"
 
@@ -119,6 +168,8 @@ class DrivableAreaPlanner:
             lane: tuple(indices)
             for lane, indices in lane_stage_indices.items()
         }
+        self.referenceMetric = _PolylineMetric.from_line(self.referLine)
+        self.routeStageLineSimilarity = {}
         self.laneCumulativeS = {
             lane: np.concatenate((
                 [0.0],
@@ -954,10 +1005,16 @@ class DrivableAreaPlanner:
         return None
 
     def _line_similarity(self, line):
-        return float(np.mean([
-            self._project_to_line(point, self.referLine)[1]
-            for point in line
-        ]))
+        return self.referenceMetric.mean_distance(line)
+
+    def _stage_line_similarity(self, stage_index, lane):
+        key = (stage_index, lane)
+        value = self.routeStageLineSimilarity.get(key)
+        if value is None:
+            value = self._line_similarity(
+                self.routeStages[stage_index][lane]['centerline'])
+            self.routeStageLineSimilarity[key] = value
+        return value
 
     def _planning_target(self, current_stage_index, reverse_point):
         route_length = self._line_length(self.referLine)
@@ -1071,11 +1128,8 @@ class DrivableAreaPlanner:
                     return None
                 next_lane = min(
                     successors,
-                    key=lambda successor: self._line_similarity(
-                        self.routeStages[stage_index + 1][successor][
-                            'centerline'
-                        ]
-                    ),
+                    key=lambda successor: self._stage_line_similarity(
+                        stage_index + 1, successor),
                 )
                 end_s = lane_range['endS']
                 connection = self.connectionBounds.get((lane, next_lane))
