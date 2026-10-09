@@ -20,7 +20,8 @@ from parameters import (
 
 
 def build_base_waypoint_candidates(
-        base_path, centerline_dict, junction_lane_ids):
+        base_path, centerline_dict, junction_lane_ids,
+        final_destination=None):
     """普通区域每隔固定距离取点；虚拟车道内部只保留头尾边界。"""
     path = np.asarray(base_path, dtype=float)
     path_xy = clean_xy(path)
@@ -46,6 +47,11 @@ def build_base_waypoint_candidates(
     # basePath起点属于固定基础候选；本帧当前位置只在future候选中加入。
     keep = ~inside
     keep[0] = True
+    if (final_destination is not None
+            and np.linalg.norm(
+                points[-1] - np.asarray(final_destination, dtype=float)[:2]
+            ) <= 1e-3):
+        keep[-1] = True
     return np.column_stack((points[keep], sample_s[keep]))
 
 
