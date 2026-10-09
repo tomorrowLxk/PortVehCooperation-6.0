@@ -23,7 +23,7 @@ PRINT_FULL_RESPONSES = False
 
 
 # 一、读取单一JSON所描述的全部测试输入并初始化长期对象。
-scenario = load_scenario(r'G:\项目\港口车辆运动规划\PortVehCooperation 5.0\test_env\demo\scenario11.json')
+scenario = load_scenario(r'G:\项目\港口车辆运动规划\PortVehCooperation 5.0\test_env\demo\scenario7.json')
 planningEngine = PlanningEngine(
     scenario.centerlineDict,
     scenario.connectorDict,

@@ -12,7 +12,7 @@
   },
   "simulation": {
     "simulationDtSeconds": 0.2,
-    "planningPeriodSeconds": 0.2,
+    "planningPeriodSeconds": 1.0,
     "maxSteps": 6000,
     "viewMarginMeters": null
   },
