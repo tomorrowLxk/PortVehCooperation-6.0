@@ -125,7 +125,8 @@ def plan_hv_spatial(
 
 def plan_agv_spatial(
         dynamic_info, static_info, planning_max_speed,
-        drivable_area_planner, reverse_point, polygons):
+        drivable_area_planner, reverse_point, polygons,
+        previous_base_path=None):
     """生成一辆AGV的basePath候选，不写接口response。"""
     position = np.asarray(dynamic_info["position"], dtype=float)[:2]
     heading = float(dynamic_info["heading"])
@@ -183,6 +184,7 @@ def plan_agv_spatial(
             vehicle_dynamic_info=dynamic_info,
             reverse_point=active_reverse_point,
             stop_at_route_end=stop_at_route_end,
+            continuation_path=previous_base_path,
         )
     except Exception as error:
         reason = "SPATIAL_PATH_SEARCH_FAILED"

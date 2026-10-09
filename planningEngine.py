@@ -643,6 +643,7 @@ class PlanningEngine:
                 drivable_area_planner=self.drivableAreaPlannerCaches.get(vehicleId),
                 reverse_point=self.reversePointCaches.get(vehicleId),
                 polygons=vehi_obstacle_polygons,
+                previous_base_path=self.vehicleBasePathCaches.get(vehicleId),
             )
             if not agv_spatial_result.success:
                 failureReason = (

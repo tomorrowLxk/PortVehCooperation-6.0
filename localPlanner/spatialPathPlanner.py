@@ -283,7 +283,8 @@ class _LineMetric:
 def plan_spatial_path(
         drivable_lines, current_position, current_heading, reference_line,
         polygons, vehicle_static_info, vehicle_dynamic_info,
-        reverse_point=None, stop_at_route_end=False):
+        reverse_point=None, stop_at_route_end=False,
+        continuation_path=None):
     current = np.asarray(current_position, dtype=float)[:2]
     reference = clean_xy(reference_line)
     if (stop_at_route_end and len(reference) == 1
@@ -310,6 +311,7 @@ def plan_spatial_path(
         lines, line_lane_segments,
         current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
+        continuation_path,
     )
     searchNodePaths = []
     searchGoals = graph.goals
@@ -469,7 +471,7 @@ def select_optimal_paths(candidates, reference_line):
 def _build_graph(
         lines, line_lane_segments,
         current, current_heading, reference, polygons,
-        static_info, dynamic_info, reverse_point):
+        static_info, dynamic_info, reverse_point, continuation_path):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
     current_projections = [metric.project(current) for metric in line_metrics]
@@ -738,10 +740,15 @@ def _build_graph(
                     source_line, target_line, "CROSS", None, nodes,
                 )
 
-    return _Graph(
+    graph = _Graph(
         lines, line_metrics, reference_metric,
         nodes, edges, adjacency, goals, stops,
         primary_line, current_line)
+    _prefer_safe_continuation_edge(
+        graph, edge_keys, continuation_path,
+        polygons, static_info, dynamic_info,
+    )
+    return graph
 
 
 def _add_node(
@@ -870,6 +877,74 @@ def _add_edge(
         kind, geometry, "UNKNOWN", 0.0, cost,
     )
     adjacency[source_id].append(edge_id)
+
+
+def _prefer_safe_continuation_edge(
+        graph, edge_keys, continuation_path,
+        polygons, static_info, dynamic_info):
+    """Prefer the safe unfinished prefix of the previous base path."""
+    if continuation_path is None:
+        return
+    previous = clean_xy(continuation_path)
+    if len(previous) < 2:
+        return
+
+    previous_metric = _LineMetric.from_line(previous)
+    current = graph.nodes["S"].point
+    current_projection = previous_metric.project(current)
+    if current_projection["distance"] > PATH_G0_LATERAL_TOLERANCE:
+        return
+    if (graph.lineMetrics[graph.currentLine].project(current)["distance"]
+            <= PATH_G0_LATERAL_TOLERANCE):
+        return
+    start_s = float(current_projection["s"])
+    minimum_s = start_s + PATH_GRAPH_START_OFFSET
+    if minimum_s >= previous_metric.total - 1e-6:
+        return
+
+    anchors = []
+    for node in graph.nodes.values():
+        if node.id == "S" or not node.lineS:
+            continue
+        projection = previous_metric.project(node.point)
+        old_s = float(projection["s"])
+        if (old_s < minimum_s
+                or projection["distance"] > PATH_G0_LATERAL_TOLERANCE):
+            continue
+        check_s = min(previous_metric.total, old_s + PATH_NODE_SPACING)
+        check_point = previous_metric.values_at([check_s])[0][0]
+        for line_index in node.lineS:
+            if line_index == graph.currentLine:
+                continue
+            if (graph.lineMetrics[line_index].project(check_point)["distance"]
+                    > PATH_G0_LATERAL_TOLERANCE):
+                continue
+            anchors.append((old_s, projection["distance"], node, line_index))
+
+    original_edges = list(graph.adjacency["S"])
+    for old_s, _, anchor, target_line in sorted(
+            anchors, key=lambda item: (item[1], item[0], item[2].id)):
+        geometry = previous_metric.slice(start_s, old_s)
+        geometry[0] = current
+        geometry = append_polyline(geometry, anchor.point.reshape(1, 2))
+
+        before = len(graph.edges)
+        _add_edge(
+            graph.edges, graph.adjacency, edge_keys,
+            "S", anchor.id, None, target_line,
+            "CONTINUATION", geometry, graph.nodes,
+        )
+        if len(graph.edges) == before:
+            continue
+        edge_id = len(graph.edges) - 1
+        _validate_edge(
+            graph, graph.edges[edge_id],
+            polygons, static_info, dynamic_info,
+        )
+        if graph.edges[edge_id].state == "VALID":
+            graph.adjacency["S"] = [edge_id]
+            return
+    graph.adjacency["S"] = original_edges
 
 
 def _same_line_baseline_paths(graph, terminal, dynamic_info):
