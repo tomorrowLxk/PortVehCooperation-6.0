@@ -364,56 +364,44 @@ class PlanningEngine:
             self, vehicleId, dynamicInfo, obstaclePolygons):
         """判断AGV的完整basePath缓存是否需要重新进行空间规划。"""
         basePath = self.vehicleBasePathCaches.get(vehicleId)
-        waypoints = self.vehicleWaypointSparseCaches.get(vehicleId)
-        noHistory = (
-                basePath is None
-                or waypoints is None
-                or len(waypoints) == 0
-        )
+        if basePath is not None:
+            basePath = clean_xy(basePath)
+        noHistory = basePath is None or len(basePath) == 0
         historyFinished = False
         vehicleDeviated = False
         historyBlocked = False
         position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
 
-        if basePath is not None:
-            basePath = clean_xy(basePath)
+        if not noHistory:
             if len(basePath) >= 2:
                 positionMatch = project_to_polyline(position, basePath)
                 basePathProgress = positionMatch['s']
+                basePathLength = polyline_length(basePath)
                 remainingBasePath = slice_polyline(
                     basePath,
                     basePathProgress,
-                    polyline_length(basePath),
+                    basePathLength,
+                )
+                historyFinished = (
+                        basePathLength - basePathProgress
+                        <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
                 )
                 vehicleDeviated = (
                         positionMatch['distance']
                         > AGV_BASE_PATH_DEVIATION_THRESHOLD
                 )
-                if waypoints is not None and len(waypoints):
-                    lastWaypoint = np.asarray(
-                        waypoints[-1], dtype=float)[:2]
-                    lastWaypointProgress = project_to_polyline(
-                        lastWaypoint, basePath)['s']
-                    historyFinished = (
-                            lastWaypointProgress - basePathProgress
-                            <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
-                    )
-            elif len(basePath) == 1:
-                remainingBasePath = basePath
-                vehicleDeviated = (
-                        np.linalg.norm(position - basePath[0, :2])
-                        > AGV_BASE_PATH_DEVIATION_THRESHOLD
-                )
-                if waypoints is not None and len(waypoints):
-                    historyFinished = (
-                            np.linalg.norm(
-                                np.asarray(waypoints[-1], dtype=float)[:2]
-                                - position
-                            )
-                            <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
-                    )
             else:
                 remainingBasePath = basePath
+                remainingDistance = np.linalg.norm(
+                    position - basePath[0, :2])
+                historyFinished = (
+                        remainingDistance
+                        <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
+                )
+                vehicleDeviated = (
+                        remainingDistance
+                        > AGV_BASE_PATH_DEVIATION_THRESHOLD
+                )
 
             if len(remainingBasePath):
                 staticInfo = self.vehicleStaticInfoCaches[vehicleId]
@@ -645,6 +633,9 @@ class PlanningEngine:
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
             staticInfo = self.vehicleStaticInfoCaches[vehicleId]
             vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
+            oldBasePath = self.vehicleBasePathCaches.get(vehicleId)
+            if oldBasePath is not None:
+                oldBasePath = clean_xy(oldBasePath).copy()
             replanFlags = self.shouldReplanAgvBasePath(
                 vehicleId, dynamicInfo, vehi_obstacle_polygons)
             (noHistory, historyFinished,
@@ -661,7 +652,7 @@ class PlanningEngine:
                 drivable_area_planner=self.drivableAreaPlannerCaches.get(vehicleId),
                 reverse_point=self.reversePointCaches.get(vehicleId),
                 polygons=vehi_obstacle_polygons,
-                previous_base_path=self.vehicleBasePathCaches.get(vehicleId),
+                previous_base_path=oldBasePath,
             )
             if not agv_spatial_result.success:
                 failureReason = (
@@ -679,24 +670,24 @@ class PlanningEngine:
             spatialDrivableLines[vehicleId] = agv_spatial_result.drivableLines
             if agv_spatial_result.candidatePaths:
                 selectedBasePath = agv_spatial_result.candidatePaths[0].copy()
-                oldWaypointSparse = self.vehicleWaypointSparseCaches.get(
-                    vehicleId)
                 if noHistory:
+                    self.vehicleIdsMustNotDispatch.discard(vehicleId)
                     self.vehicleIdsMustDispatch.add(vehicleId)
                 elif historyFinished:
                     endpointDistance = np.linalg.norm(
                         selectedBasePath[-1, :2]
-                        - np.asarray(
-                            oldWaypointSparse[-1], dtype=float)[:2]
+                        - oldBasePath[-1, :2]
                     )
                     if (endpointDistance
                             > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD):
+                        self.vehicleIdsMustNotDispatch.discard(vehicleId)
                         self.vehicleIdsMustDispatch.add(vehicleId)
                     else:
+                        self.vehicleIdsMustDispatch.discard(vehicleId)
                         self.vehicleIdsMustNotDispatch.add(vehicleId)
-                else:
+                elif vehicleDeviated or historyBlocked:
+                    self.vehicleIdsMustNotDispatch.discard(vehicleId)
                     self.vehicleIdsMustDispatch.add(vehicleId)
-
                 self.vehicleBasePathCaches[vehicleId] = selectedBasePath
                 planner = self.drivableAreaPlannerCaches.get(vehicleId)
                 candidateCenterlines = (
