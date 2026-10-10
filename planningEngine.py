@@ -683,8 +683,12 @@ class PlanningEngine:
                         selectedBasePath,
                         candidateCenterlines,
                         junctionLaneIds,
-                        final_destination=self.vehicleRouteCaches[
-                            vehicleId][-1],
+                        final_destination=(
+                            self.vehicleRouteCaches[vehicleId][-1]
+                            if vehicleId in self.vehicleRouteCaches
+                            and len(self.vehicleRouteCaches[vehicleId])
+                            else None
+                        ),
                     )
                 )
             if agv_spatial_result.reversePointReached:
