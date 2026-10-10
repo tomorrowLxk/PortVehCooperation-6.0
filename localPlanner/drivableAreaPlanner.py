@@ -11,6 +11,8 @@ from parameters import (
     DRIVABLE_LINE_POINT_SPACING,
     FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE,
     FEASIBLE_DOMAIN_LANE_CHANGE_DISTANCE,
+    JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE,
+    JUNCTION_EXIT_PATH_EXTENSION,
     FEASIBLE_DOMAIN_SEARCH_DEPTH,
     VEHICLE_LANE_LOCATE_HEADING_MIN_SPEED,
     VEHICLE_LANE_LOCATE_HEADING_WEIGHT,
@@ -1037,6 +1039,35 @@ class DrivableAreaPlanner:
                 target_stage_index = index
                 break
 
+        # When the fixed look-ahead ends inside a junction lane, include the
+        # complete junction lane and a short part of its downstream exit lane.
+        target_reference_lanes = self.routeStageReferenceLaneIds[
+            target_stage_index
+        ]
+        if any(
+                lane in self.junctionLaneIds
+                for lane in target_reference_lanes):
+            junction_exit_route_s = self.routeStageBounds[
+                target_stage_index
+            ][1]
+            remaining_after_exit = phase_end_s - junction_exit_route_s
+            if remaining_after_exit > 1e-6:
+                if (remaining_after_exit
+                        <= JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE):
+                    target_route_s = phase_end_s
+                else:
+                    target_route_s = min(
+                        junction_exit_route_s
+                        + JUNCTION_EXIT_PATH_EXTENSION,
+                        phase_end_s,
+                    )
+                for index in range(
+                        target_stage_index, len(self.routeStageBounds)):
+                    if (target_route_s
+                            <= self.routeStageBounds[index][1] + 1e-6):
+                        target_stage_index = index
+
+                        break
         if (reverse_point is not None
                 and not self.passedReversePoint
                 and abs(target_route_s - phase_end_s) <= 1e-6):

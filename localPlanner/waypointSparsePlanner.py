@@ -2,8 +2,17 @@
 
 import numpy as np
 
-from localPlanner.pathGeometry import heading_at_s, point_at_s
+from localPlanner.pathGeometry import (
+    clean_xy,
+    heading_at_s,
+    point_at_s,
+    polyline_length,
+    project_to_polyline,
+)
 from parameters import (
+    JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE,
+    JUNCTION_EXIT_PATH_EXTENSION,
+    VEHICLE_LANE_LOCATE_MAX_DISTANCE,
     WAYPOINT_SPARSE_COUNT,
     WAYPOINT_SPARSE_FIRST_SECOND_MIN_SPACING,
     WAYPOINT_SPARSE_MIN_SPACING,

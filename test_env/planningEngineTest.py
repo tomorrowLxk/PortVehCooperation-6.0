@@ -11,9 +11,10 @@ from parameters import (
     VEHICLE_OBSTACLE_MAX_FRAMES,
     VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD,
     VEHICLE_STOP_SPEED_THRESHOLD,
+    AGV_BASE_PATH_DEVIATION_THRESHOLD,
+    AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD,
     AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE,
     PATH_COLLISION_SAMPLE_SPACING,
-    PATH_G0_LATERAL_TOLERANCE,
     PATH_LATERAL_SAFETY_MARGIN,
 )
 
@@ -94,6 +95,9 @@ class PlanningEngine:
         self.vehicleWaypointSparseCaches: Dict[str, Any] = {}
         # 本帧必须重新向车端下发waypoint的车辆ID；每帧开始时清空。
         self.vehicleIdsNeedWaypointUpdate: set[str] = set()
+        # 本帧空间重规划已经能够确定必须下发或必须不下发的车辆ID。
+        self.vehicleIdsMustDispatch: set[str] = set()
+        self.vehicleIdsMustNotDispatch: set[str] = set()
 
         # AV/HV统一内部静态参数：长宽、限速、最小转弯半径等。
         self.vehicleStaticInfoCaches: Dict[str, Any] = {}
@@ -351,62 +355,71 @@ class PlanningEngine:
             self, vehicleId, dynamicInfo, obstaclePolygons):
         """判断AGV的完整basePath缓存是否需要重新进行空间规划。"""
         basePath = self.vehicleBasePathCaches.get(vehicleId)
-        if (basePath is None
-                or vehicleId not in self.vehicleBaseWaypointCandidateCaches):
-            return True
-        basePath = clean_xy(basePath)
-        if len(basePath) < 2:
-            return True
-
-        planner = self.drivableAreaPlannerCaches.get(vehicleId)
-        referenceLine = (
-            planner.referLine
-            if planner is not None
-            else self.vehicleRouteCaches.get(vehicleId)
-        )
-        if referenceLine is None or len(referenceLine) < 2:
-            return True
-        if (project_to_polyline(basePath[-1, :2], referenceLine)['distance']
-                > PATH_G0_LATERAL_TOLERANCE):
-            return True
-
-        position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
-        basePathProgress = project_to_polyline(position, basePath)['s']
-        remainingBasePath = slice_polyline(
-            basePath,
-            basePathProgress,
-            polyline_length(basePath),
-        )
-        staticInfo = self.vehicleStaticInfoCaches[vehicleId]
-        if path_vehicle_intersects(
-                remainingBasePath,
-                obstaclePolygons,
-                staticInfo['length'],
-                staticInfo['width'],
-                dynamicInfo.get('longitudinalUncertainty', 0.0),
-                dynamicInfo.get('lateralUncertainty', 0.0),
-                PATH_LATERAL_SAFETY_MARGIN,
-                PATH_COLLISION_SAMPLE_SPACING):
-            return True
-
         waypoints = self.vehicleWaypointSparseCaches.get(vehicleId)
-        if waypoints is None or len(waypoints) == 0:
-            return True
-        thirdWaypoint = np.asarray(waypoints[-2], dtype=float)[:2]
-        thirdWaypointProgress = project_to_polyline(
-            thirdWaypoint, basePath)['s']
-        if basePathProgress >= thirdWaypointProgress - 1e-9:
-            return True
+        noHistory = (
+                basePath is None
+                or waypoints is None
+                or len(waypoints) == 0
+        )
+        historyFinished = False
+        vehicleDeviated = False
+        historyBlocked = False
+        position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
 
-        lastWaypoint = np.asarray(waypoints[-1], dtype=float)[:2]
-        lastWaypointProgress = project_to_polyline(
-            lastWaypoint, basePath)['s']
-        remainingToLastWaypoint = lastWaypointProgress - basePathProgress
-        if (remainingToLastWaypoint
-                <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE):
-            return True
+        if basePath is not None:
+            basePath = clean_xy(basePath)
+            if len(basePath) >= 2:
+                positionMatch = project_to_polyline(position, basePath)
+                basePathProgress = positionMatch['s']
+                remainingBasePath = slice_polyline(
+                    basePath,
+                    basePathProgress,
+                    polyline_length(basePath),
+                )
+                vehicleDeviated = (
+                        positionMatch['distance']
+                        > AGV_BASE_PATH_DEVIATION_THRESHOLD
+                )
+                if waypoints is not None and len(waypoints):
+                    lastWaypoint = np.asarray(
+                        waypoints[-1], dtype=float)[:2]
+                    lastWaypointProgress = project_to_polyline(
+                        lastWaypoint, basePath)['s']
+                    historyFinished = (
+                            lastWaypointProgress - basePathProgress
+                            <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
+                    )
+            elif len(basePath) == 1:
+                remainingBasePath = basePath
+                vehicleDeviated = (
+                        np.linalg.norm(position - basePath[0, :2])
+                        > AGV_BASE_PATH_DEVIATION_THRESHOLD
+                )
+                if waypoints is not None and len(waypoints):
+                    historyFinished = (
+                            np.linalg.norm(
+                                np.asarray(waypoints[-1], dtype=float)[:2]
+                                - position
+                            )
+                            <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
+                    )
+            else:
+                remainingBasePath = basePath
 
-        return False
+            if len(remainingBasePath):
+                staticInfo = self.vehicleStaticInfoCaches[vehicleId]
+                historyBlocked = path_vehicle_intersects(
+                    remainingBasePath,
+                    obstaclePolygons,
+                    staticInfo['length'],
+                    staticInfo['width'],
+                    dynamicInfo.get('longitudinalUncertainty', 0.0),
+                    dynamicInfo.get('lateralUncertainty', 0.0),
+                    PATH_LATERAL_SAFETY_MARGIN,
+                    PATH_COLLISION_SAMPLE_SPACING,
+                )
+
+        return noHistory, historyFinished, vehicleDeviated, historyBlocked
 
     def updateVehicleObstacleCaches(
             self, requests, effectiveWaypointWholeResults,
@@ -537,6 +550,8 @@ class PlanningEngine:
             junctionLaneIds, obstacleMap, laneSignal_zy, longRouteResult
     ) -> List[Any]:
         self.vehicleIdsNeedWaypointUpdate.clear()
+        self.vehicleIdsMustDispatch.clear()
+        self.vehicleIdsMustNotDispatch.clear()
 
         # todo. 一、短路径所有输入，包括车辆动静态信息、地图、障碍物、长路径、信号灯，不能改动
         CenterlineDict = centerlineDict
@@ -608,12 +623,15 @@ class PlanningEngine:
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
             staticInfo = self.vehicleStaticInfoCaches[vehicleId]
             vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
-            if not self.shouldReplanAgvBasePath(vehicleId, dynamicInfo, vehi_obstacle_polygons):
+            replanFlags = self.shouldReplanAgvBasePath(
+                vehicleId, dynamicInfo, vehi_obstacle_polygons)
+            (noHistory, historyFinished,
+             vehicleDeviated, historyBlocked) = replanFlags
+            if not any(replanFlags):
                 AGV_basePathCandidates[vehicleId] = [self.vehicleBasePathCaches[vehicleId].copy()]
                 agvExecutableShortPathVehicleIds.add(vehicleId)
                 continue
 
-            self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
             agv_spatial_result = plan_agv_spatial(
                 dynamic_info=dynamicInfo,
                 static_info=staticInfo,
@@ -642,6 +660,24 @@ class PlanningEngine:
             )
             if agv_spatial_result.candidatePaths:
                 selectedBasePath = agv_spatial_result.candidatePaths[0].copy()
+                oldWaypointSparse = self.vehicleWaypointSparseCaches.get(
+                    vehicleId)
+                if noHistory:
+                    self.vehicleIdsMustDispatch.add(vehicleId)
+                elif historyFinished:
+                    endpointDistance = np.linalg.norm(
+                        selectedBasePath[-1, :2]
+                        - np.asarray(
+                            oldWaypointSparse[-1], dtype=float)[:2]
+                    )
+                    if (endpointDistance
+                            > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD):
+                        self.vehicleIdsMustDispatch.add(vehicleId)
+                    else:
+                        self.vehicleIdsMustNotDispatch.add(vehicleId)
+                else:
+                    self.vehicleIdsMustDispatch.add(vehicleId)
+
                 self.vehicleBasePathCaches[vehicleId] = selectedBasePath
                 planner = self.drivableAreaPlannerCaches.get(vehicleId)
                 candidateCenterlines = (

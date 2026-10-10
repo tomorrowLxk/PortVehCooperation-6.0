@@ -28,6 +28,8 @@ FEASIBLE_DOMAIN_LANE_CHANGE_DISTANCE = 0.0  # 完整可行域中每横向换一�
 FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE = 0.5  # 前后车道中心线重叠判定的最大横向距离，单位m
 DRIVABLE_LINE_FORWARD_LENGTH = 80.0  # 每帧局部可行线相对车辆当前长路径进度的前视距离，单位m
 DRIVABLE_LINE_POINT_SPACING = 1.0  # 局部可行线输出点的目标间距，单位m
+JUNCTION_EXIT_PATH_EXTENSION = 5.0  # 前视末端落在交叉口内部时，出弯后沿出口道最多补充的路径长度，单位m
+JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE = 2.0  # 出口点与全局终点沿路径距离不超过该值时合并，单位m
 DRIVABLE_LINE_MAX_COUNT = 3  # 每辆车每帧最多输出的局部可行线数量
 VEHICLE_LANE_LOCATE_MAX_DISTANCE = 10.0  # 车辆位置允许匹配到车道中心线的最大横向距离，单位m
 VEHICLE_LANE_LOCATE_HEADING_MIN_SPEED = 0.5  # 车辆速度低于该值时，位置匹配不使用航向约束，单位m/s
@@ -63,6 +65,8 @@ PRIORITY_CONFLICT_SAMPLE_SPACING = 2.0  # 优先级冲突入口搜索的粗采�
 PRIORITY_CONFLICT_UPSTREAM_DISTANCE = 2.0  # 冲突锚点相对冲突区入口的上游偏移，单位m
 HV_PREDICTION_HORIZON = 3.0  # HV按当前速度匀速预测的时间范围，单位s
 AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 20.0  # AGV距离历史第四个waypoint不超过该值时触发basePath重规划，单位m
+AGV_BASE_PATH_DEVIATION_THRESHOLD = 6.0  # AGV当前位置距离历史basePath超过该值时触发空间重规划，单位m
+AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD = 1.0  # 新basePath末端与历史waypointSparse末端在该距离内视为相同，单位m
 
 PATH_NODE_SPACING = 4.0  # 每条可行域线生成普通P节点的纵向间距，单位m
 PATH_GRAPH_START_OFFSET = 10.0  # 从车辆当前位置向前首次布置P节点的距离，单位m
