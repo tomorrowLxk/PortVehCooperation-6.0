@@ -21,7 +21,8 @@ from parameters import (
 
 def build_waypoint_sparse(
         waypoint_whole, dynamic_info,
-        junction_entrance=None, centerline_dict=None):
+        junction_entrance=None, centerline_dict=None,
+        junction_lane_ids=None):
     """返回四个[x, y, heading, speed, arrivalTime]。"""
     if len(waypoint_whole.points) == 1:
         return _stationary_sparse(
@@ -31,7 +32,14 @@ def build_waypoint_sparse(
             centerline_dict,
         )
 
+    junction_exit_s = _terminal_junction_exit_s(
+        waypoint_whole.futurePath,
+        centerline_dict,
+        junction_lane_ids,
+    )
     indices = _select_sparse_indices(waypoint_whole.futurePathS)
+    indices = _keep_terminal_junction_exit(
+        indices, waypoint_whole.futurePathS, junction_exit_s)
     rows = []
     for index in indices:
         path_s = float(waypoint_whole.futurePathS[index])
@@ -133,3 +141,71 @@ def _first_at_or_after(values, target, start, last):
     relative = int(np.searchsorted(
         values[start:last + 1], target, side='left'))
     return min(start + relative, last)
+
+
+def _terminal_junction_exit_s(
+        future_path, centerline_dict, junction_lane_ids):
+    """Return the terminal junction exit retained before the path tail."""
+    path = clean_xy(future_path)
+    if (len(path) < 2
+            or not centerline_dict
+            or not junction_lane_ids):
+        return None
+
+    total = polyline_length(path)
+    candidates = []
+    path_min = np.min(path, axis=0)
+    path_max = np.max(path, axis=0)
+    for lane_id in junction_lane_ids:
+        if lane_id not in centerline_dict:
+            continue
+        lane = clean_xy(centerline_dict[lane_id])
+        if len(lane) < 2:
+            continue
+        if (np.any(np.max(lane, axis=0) < path_min)
+                or np.any(np.min(lane, axis=0) > path_max)):
+            continue
+
+        projection = project_to_polyline(lane[-1], path)
+        remaining = total - float(projection['s'])
+        if (projection['distance'] <= 1e-3
+                and remaining
+                > JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE + 1e-6
+                and remaining
+                <= JUNCTION_EXIT_PATH_EXTENSION + 1e-3):
+            candidates.append(float(projection['s']))
+
+    return max(candidates) if candidates else None
+
+
+def _keep_terminal_junction_exit(selected, future_path_s, junction_exit_s):
+    """Keep first, junction-exit and post-turn tail within four points."""
+    if junction_exit_s is None:
+        return np.asarray(selected, dtype=int)
+
+    values = np.asarray(future_path_s, dtype=float)
+    last = len(values) - 1
+    mandatory = int(np.argmin(np.abs(values - junction_exit_s)))
+    if (abs(float(values[mandatory]) - float(junction_exit_s)) > 1e-3
+            or mandatory <= 0
+            or mandatory >= last):
+        return np.asarray(selected, dtype=int)
+
+    first = min(1, last)
+    anchors = sorted(set((first, mandatory, last)))
+    if len(anchors) < WAYPOINT_SPARSE_COUNT:
+        optional = sorted(set(
+            int(index) for index in np.asarray(selected, dtype=int)
+            if first < int(index) < mandatory
+            and int(index) not in anchors
+        ))
+        if optional:
+            midpoint = 0.5 * (values[first] + values[mandatory])
+            anchors.append(min(
+                optional,
+                key=lambda index: abs(values[index] - midpoint),
+            ))
+            anchors.sort()
+
+    anchors.extend([last] * (WAYPOINT_SPARSE_COUNT - len(anchors)))
+    return np.asarray(anchors[:WAYPOINT_SPARSE_COUNT], dtype=int)

@@ -942,6 +942,7 @@ class PlanningEngine:
                 junction_entrance=self.vehicleJunctionEntranceCaches.get(
                     vehicleId),
                 centerline_dict=CenterlineDict,
+                junction_lane_ids=junctionLaneIds,
             )
             waypointSparseResults[vehicleId] = waypointSparse
             self.vehicleWaypointWholeCaches[vehicleId] = newWaypointWhole

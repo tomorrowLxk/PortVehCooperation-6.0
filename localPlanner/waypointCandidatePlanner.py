@@ -32,8 +32,9 @@ def build_base_waypoint_candidates(
     total = polyline_length(path_xy)
     sample_s = list(np.arange(0.0, total, WAYPOINT_CANDIDATE_SPACING))
     sample_s.append(total)
-    sample_s.extend(_junction_boundary_s(
-        path_xy, centerline_dict, junction_lane_ids))
+    junction_boundary_s = _junction_boundary_s(
+        path_xy, centerline_dict, junction_lane_ids)
+    sample_s.extend(junction_boundary_s)
     sample_s = np.asarray(sorted(set(
         round(float(value), 6) for value in sample_s
     )), dtype=float)
@@ -45,7 +46,13 @@ def build_base_waypoint_candidates(
         points, centerline_dict, junction_lane_ids)
 
     # basePath起点属于固定基础候选；本帧当前位置只在future候选中加入。
-    keep = ~inside
+    boundary = np.zeros(len(sample_s), dtype=bool)
+    if junction_boundary_s:
+        boundary = np.any(
+            np.abs(sample_s[:, None]
+                   - np.asarray(junction_boundary_s)[None, :]) <= 1e-6,
+            axis=1)
+    keep = ~inside | boundary
     keep[0] = True
     if (final_destination is not None
             and np.linalg.norm(
