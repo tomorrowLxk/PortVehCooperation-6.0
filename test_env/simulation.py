@@ -253,6 +253,7 @@ class VehicleSimulator:
         waypointPoints = []
         intervalSpeeds = []
         pathVoFirstPoints = []
+        lastPathVoPoint = None
 
         for segment in response.get('shortPathList') or ():
             speed = max(0.0, float(segment.get('speedLimit') or 0.0))
@@ -261,6 +262,9 @@ class VehicleSimulator:
                 firstPoint = rawPoints[0]
                 pathVoFirstPoints.append(np.asarray(
                     [firstPoint['x'], firstPoint['y']], dtype=float))
+                finalPoint = rawPoints[-1]
+                lastPathVoPoint = np.asarray(
+                    [finalPoint['x'], finalPoint['y']], dtype=float)
             for rawPoint in rawPoints:
                 point = np.asarray(
                     [rawPoint['x'], rawPoint['y']], dtype=float)
@@ -272,6 +276,8 @@ class VehicleSimulator:
                 waypointPoints.append(point)
                 intervalSpeeds.append(speed)
 
+        if lastPathVoPoint is not None:
+            pathVoFirstPoints.append(lastPathVoPoint)
         self.displayPathVoPoints = (
             np.asarray(pathVoFirstPoints, dtype=float)
             if pathVoFirstPoints else np.empty((0, 2), dtype=float)
