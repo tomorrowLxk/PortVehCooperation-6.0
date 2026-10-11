@@ -43,7 +43,10 @@ def build_response_path_lists(
         stop = _path_vo(
             final_destination=_is_final(waypoint_array[0, :2], goal),
             lane_id=lane_id,
-            points=[_position(waypoint_array[0])],
+            points=[
+                _position(waypoint_array[0]),
+                _position(waypoint_array[0]),
+            ],
             speed=waypoint_array[0, 3],
             action=_declared_action(
                 lane_metadata, lane_id, junction_lane_ids),
@@ -102,16 +105,6 @@ def build_response_path_lists(
             if np.isfinite(duration) and duration > 1e-9
             else 0.0
         )
-        if movable_index == 0:
-            total_duration = float(end[4])
-            total_length = max(0.0, end_s)
-            # 第一段速度从车辆当前位置开始执行，因此使用当前位置到
-            # 第二个稀疏点的累计距离除以累计计划时间。
-            segment_speed = (
-                total_length / total_duration
-                if np.isfinite(total_duration) and total_duration > 1e-9
-                else 0.0
-            )
         start_lane = lane_matches[index]
         end_lane = lane_matches[index + 1]
         middle_lane = lane_matches[middle_offset + movable_index]
@@ -136,18 +129,6 @@ def build_response_path_lists(
             junction_id=junction_id,
         )
         short_paths.append(segment)
-
-        if end[3] <= 1e-9:
-            short_paths.append(_path_vo(
-                final_destination=final_destination,
-                lane_id=end_lane,
-                points=[_position(end)],
-                speed=0.0,
-                action=action,
-                direction=direction,
-                length=0.0,
-                junction_id=junction_id,
-            ))
 
     return short_paths, _merge_paths(short_paths)
 
@@ -359,6 +340,10 @@ def _merge_paths(short_paths):
 def _can_merge(first, second):
     if any(first[key] != second[key] for key in (
             'laneId', 'action', 'direction', 'junctionId')):
+        return False
+    first_stopped = first['speedLimit'] <= 1e-9
+    second_stopped = second['speedLimit'] <= 1e-9
+    if first_stopped != second_stopped:
         return False
     if len(first['points']) < 2 or len(second['points']) < 2:
         return False

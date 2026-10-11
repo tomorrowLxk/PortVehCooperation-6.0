@@ -1,152 +1,157 @@
-"""第十二阶段：从waypointWhole中选取固定四点waypointSparse。"""
+"""Stage 12: build the 1-4 waypoints that are actually sent downstream."""
 
+import math
 import numpy as np
 
 from localPlanner.pathGeometry import (
-    clean_xy,
-    heading_at_s,
-    point_at_s,
-    polyline_length,
+    clean_xy, heading_at_s, point_at_s, polyline_length,
     project_to_polyline,
 )
 from parameters import (
     JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE,
     JUNCTION_EXIT_PATH_EXTENSION,
-    VEHICLE_LANE_LOCATE_MAX_DISTANCE,
+    WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
+    WAYPOINT_OUTPUT_MIN_SPACING,
     WAYPOINT_SPARSE_COUNT,
-    WAYPOINT_SPARSE_FIRST_SECOND_MIN_SPACING,
-    WAYPOINT_SPARSE_MIN_SPACING,
 )
 
 
 def build_waypoint_sparse(
-        waypoint_whole, dynamic_info,
+        waypoint_whole, dynamic_info, base_path, base_candidates,
         junction_entrance=None, centerline_dict=None,
         junction_lane_ids=None):
-    """返回四个[x, y, heading, speed, arrivalTime]。"""
-    if len(waypoint_whole.points) == 1:
-        return _stationary_sparse(
-            waypoint_whole,
-            dynamic_info,
-            junction_entrance,
-            centerline_dict,
-        )
+    """Build a complete-range sparse result while retaining the internal stop."""
+    del junction_entrance
+    path = clean_xy(base_path)
+    position = np.asarray(dynamic_info['position'], dtype=float)[:2]
+    heading = float(dynamic_info['heading'])
+    if len(path) < 2 or polyline_length(path) <= 1e-9:
+        return _forward_stop(position, heading)
 
+    total = polyline_length(path)
+    current_s = float(project_to_polyline(position, path)['s'])
+    stop_s = float(project_to_polyline(
+        waypoint_whole.points[-1], path)['s'])
+    stop_s = float(np.clip(stop_s, current_s, total))
+    candidate_s = _candidate_s_values(base_candidates, path, total)
+    forward_s = candidate_s[
+        candidate_s >= current_s + WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE - 1e-9
+    ]
+
+    anchors = []
+    _add_anchor(anchors, total, 0)
+    if stop_s >= current_s + WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE - 1e-9:
+        _add_anchor(anchors, stop_s, 1)
     junction_exit_s = _terminal_junction_exit_s(
-        waypoint_whole.futurePath,
-        centerline_dict,
-        junction_lane_ids,
+        path, centerline_dict, junction_lane_ids)
+    if (junction_exit_s is not None
+            and junction_exit_s
+            >= current_s + WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE - 1e-9):
+        _add_anchor(anchors, junction_exit_s, 2)
+    if len(forward_s):
+        _add_anchor(anchors, float(forward_s[0]), 3)
+    _fill_balanced_anchors(anchors, forward_s)
+
+    selected_s = np.asarray(sorted(value for value, _ in anchors), dtype=float)
+    if len(selected_s) == 0:
+        return _forward_stop(position, heading)
+    rows = []
+    stop_relative_s = max(0.0, stop_s - current_s)
+    for path_s in selected_s:
+        point = point_at_s(path, path_s)
+        relative_s = max(0.0, path_s - current_s)
+        if relative_s <= stop_relative_s + 1e-6:
+            arrival = waypoint_whole.time_at_s(relative_s)
+            speed = waypoint_whole.speed_at_s(relative_s)
+            if (waypoint_whole.stopped
+                    and abs(relative_s - stop_relative_s) <= 1e-6):
+                speed = 0.0
+        else:
+            arrival = float('inf')
+            speed = 0.0
+        rows.append([
+            point[0], point[1], heading_at_s(path, path_s),
+            max(0.0, float(speed)), float(arrival),
+        ])
+    return np.asarray(rows, dtype=float)
+
+
+def build_hv_waypoint_sparse(waypoint_whole, dynamic_info, base_path):
+    """Build a fresh complete-range sparse result for an HV prediction."""
+    return build_waypoint_sparse(
+        waypoint_whole=waypoint_whole,
+        dynamic_info=dynamic_info,
+        base_path=base_path,
+        base_candidates=None,
     )
-    indices = _select_sparse_indices(waypoint_whole.futurePathS)
-    indices = _keep_terminal_junction_exit(
-        indices, waypoint_whole.futurePathS, junction_exit_s)
-    rows = []
-    for index in indices:
-        path_s = float(waypoint_whole.futurePathS[index])
-        rows.append([
-            waypoint_whole.points[index, 0],
-            waypoint_whole.points[index, 1],
-            heading_at_s(waypoint_whole.futurePath, path_s),
-            waypoint_whole.pointSpeeds[index],
-            waypoint_whole.arrivalTimes[index],
-        ])
-    return np.asarray(rows, dtype=float)
 
 
-def build_hv_waypoint_sparse(waypoint_whole, dynamic_info):
-    "从本帧HV匀速预测中等距抽取四点，不使用AGV交叉口与复用规则。"
-    total = float(waypoint_whole.motionS[-1])
-    speed = max(0.0, float(dynamic_info['speed']))
-    if total <= 1e-9 or speed <= 1e-9:
-        point = np.asarray(dynamic_info['position'], dtype=float)[:2]
-        row = np.asarray([
-            point[0], point[1], float(dynamic_info['heading']), 0.0, 0.0
-        ])
-        return np.repeat(row.reshape(1, 5), WAYPOINT_SPARSE_COUNT, axis=0)
-
-    rows = []
-    for path_s in np.linspace(0.0, total, WAYPOINT_SPARSE_COUNT):
-        point = point_at_s(waypoint_whole.futurePath, path_s)
-        rows.append([
-            point[0],
-            point[1],
-            heading_at_s(waypoint_whole.futurePath, path_s),
-            waypoint_whole.speed_at_s(path_s),
-            waypoint_whole.time_at_s(path_s),
-        ])
-    return np.asarray(rows, dtype=float)
+def _forward_stop(position, heading):
+    """A failed one-point plan is sent as one zero-speed point ahead."""
+    point = position + WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE * np.asarray([
+        math.cos(heading), math.sin(heading)
+    ])
+    return np.asarray([[
+        point[0], point[1], heading, 0.0, 0.0
+    ]], dtype=float)
 
 
-def _stationary_sparse(
-        waypoint_whole, dynamic_info,
-        junction_entrance, centerline_dict):
-    if junction_entrance is None:
-        point = waypoint_whole.points[0]
-        heading = float(dynamic_info['heading'])
+def _candidate_s_values(base_candidates, path, total):
+    if base_candidates is None:
+        values = np.linspace(0.0, total, max(WAYPOINT_SPARSE_COUNT * 4, 2))
     else:
-        point = np.asarray(
-            junction_entrance['entrancePoint'], dtype=float)[:2]
-        lane_id = junction_entrance['junctionLaneId']
-        heading = heading_at_s(centerline_dict[lane_id], 0.0)
+        candidates = np.asarray(base_candidates, dtype=float)
+        if candidates.ndim == 2 and candidates.shape[1] >= 3:
+            values = candidates[:, 2]
+        elif candidates.ndim == 2 and len(candidates):
+            values = np.asarray([
+                project_to_polyline(point[:2], path)['s']
+                for point in candidates
+            ], dtype=float)
+        else:
+            values = np.empty(0, dtype=float)
+    values = np.r_[np.asarray(values, dtype=float), total]
+    return np.unique(np.clip(values, 0.0, total))
 
-    row = np.asarray([point[0], point[1], heading, 0.0, 0.0], dtype=float)
-    return np.repeat(row.reshape(1, 5), WAYPOINT_SPARSE_COUNT, axis=0)
+
+def _add_anchor(anchors, value, priority):
+    value = float(value)
+    for index, (existing, existing_priority) in enumerate(anchors):
+        if abs(existing - value) <= WAYPOINT_OUTPUT_MIN_SPACING + 1e-9:
+            if priority < existing_priority:
+                anchors[index] = (value, priority)
+            return
+    if len(anchors) < WAYPOINT_SPARSE_COUNT:
+        anchors.append((value, priority))
 
 
-def _select_sparse_indices(future_path_s):
-    values = np.asarray(future_path_s, dtype=float)
-    first = 1
-    last = len(values) - 1
-    total = float(values[last] - values[first])
-
-    # 一般间距不足时，仅在实际候选点中确实存在第二个合法点时保留两点。
-    if total < WAYPOINT_SPARSE_MIN_SPACING - 1e-9:
-        hasSecondPoint = any(
-            values[index] - values[first]
-            > WAYPOINT_SPARSE_FIRST_SECOND_MIN_SPACING
-            for index in range(first + 1, last + 1)
+def _fill_balanced_anchors(anchors, candidates):
+    available = [
+        float(value) for value in np.asarray(candidates, dtype=float)
+        if all(
+            abs(float(value) - existing)
+            > WAYPOINT_OUTPUT_MIN_SPACING + 1e-9
+            for existing, _ in anchors
         )
-        if hasSecondPoint:
-            return np.asarray([first, last, last, last], dtype=int)
-        return np.full(WAYPOINT_SPARSE_COUNT, last, dtype=int)
-
-    second_target = values[first] + total / 3.0
-    second = _first_at_or_after(values, second_target, first + 1, last)
-    third_target = values[second] + (values[last] - values[second]) / 2.0
-    third = _first_at_or_after(values, third_target, second + 1, last)
-
-    selected = [first]
-    for index in (second, third):
-        if index >= last or index == selected[-1]:
-            continue
-        if values[index] - values[selected[-1]] < WAYPOINT_SPARSE_MIN_SPACING:
-            continue
-        if values[last] - values[index] < WAYPOINT_SPARSE_MIN_SPACING:
-            continue
-        selected.append(index)
-    selected.append(last)
-
-    if (len(selected) >= 2
-            and values[selected[1]] - values[selected[0]]
-            <= WAYPOINT_SPARSE_FIRST_SECOND_MIN_SPACING):
-        return np.full(WAYPOINT_SPARSE_COUNT, last, dtype=int)
-
-    selected.extend([last] * (WAYPOINT_SPARSE_COUNT - len(selected)))
-    return np.asarray(selected[:WAYPOINT_SPARSE_COUNT], dtype=int)
+    ]
+    while available and len(anchors) < WAYPOINT_SPARSE_COUNT:
+        ordered = sorted(value for value, _ in anchors)
+        best = max(
+            available,
+            key=lambda value: min(abs(value - existing) for existing in ordered),
+        )
+        _add_anchor(anchors, best, 4)
+        available = [
+            value for value in available
+            if all(
+                abs(value - existing)
+                > WAYPOINT_OUTPUT_MIN_SPACING + 1e-9
+                for existing, _ in anchors
+            )
+        ]
 
 
-def _first_at_or_after(values, target, start, last):
-    if start >= last:
-        return last
-    relative = int(np.searchsorted(
-        values[start:last + 1], target, side='left'))
-    return min(start + relative, last)
-
-
-def _terminal_junction_exit_s(
-        future_path, centerline_dict, junction_lane_ids):
-    """Return the terminal junction exit retained before the path tail."""
-    path = clean_xy(future_path)
+def _terminal_junction_exit_s(path, centerline_dict, junction_lane_ids):
     if (len(path) < 2
             or not centerline_dict
             or not junction_lane_ids):
@@ -165,7 +170,6 @@ def _terminal_junction_exit_s(
         if (np.any(np.max(lane, axis=0) < path_min)
                 or np.any(np.min(lane, axis=0) > path_max)):
             continue
-
         projection = project_to_polyline(lane[-1], path)
         remaining = total - float(projection['s'])
         if (projection['distance'] <= 1e-3
@@ -174,38 +178,4 @@ def _terminal_junction_exit_s(
                 and remaining
                 <= JUNCTION_EXIT_PATH_EXTENSION + 1e-3):
             candidates.append(float(projection['s']))
-
     return max(candidates) if candidates else None
-
-
-def _keep_terminal_junction_exit(selected, future_path_s, junction_exit_s):
-    """Keep first, junction-exit and post-turn tail within four points."""
-    if junction_exit_s is None:
-        return np.asarray(selected, dtype=int)
-
-    values = np.asarray(future_path_s, dtype=float)
-    last = len(values) - 1
-    mandatory = int(np.argmin(np.abs(values - junction_exit_s)))
-    if (abs(float(values[mandatory]) - float(junction_exit_s)) > 1e-3
-            or mandatory <= 0
-            or mandatory >= last):
-        return np.asarray(selected, dtype=int)
-
-    first = min(1, last)
-    anchors = sorted(set((first, mandatory, last)))
-    if len(anchors) < WAYPOINT_SPARSE_COUNT:
-        optional = sorted(set(
-            int(index) for index in np.asarray(selected, dtype=int)
-            if first < int(index) < mandatory
-            and int(index) not in anchors
-        ))
-        if optional:
-            midpoint = 0.5 * (values[first] + values[mandatory])
-            anchors.append(min(
-                optional,
-                key=lambda index: abs(values[index] - midpoint),
-            ))
-            anchors.sort()
-
-    anchors.extend([last] * (WAYPOINT_SPARSE_COUNT - len(anchors)))
-    return np.asarray(anchors[:WAYPOINT_SPARSE_COUNT], dtype=int)

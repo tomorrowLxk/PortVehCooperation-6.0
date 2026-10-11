@@ -81,7 +81,7 @@
 if noHistory:
     必须下发
 elif historyFinished:
-    if distance(newBasePath[-1], oldWaypointSparse[-1]) <= 1.0:
+    if distance(newBasePath[-1], oldWaypointSparse[-1]) <= 2.0:
         必须不下发
     else:
         必须下发
@@ -113,8 +113,8 @@ oldWaypointSparse[-1] == oldBasePath[-1] == P5
 
 ### 七、待后续实现时重点核对
 
-1. 当前空间阶段已经存在 `vehicleIdsMustDispatch` 和 `vehicleIdsMustNotDispatch` 的初步代码，但其判断尚未建立在“外部 `waypointSparse` 始终保留 `P5`”这一前提上，需要重新整理。
-2. `waypointSparse` 打包逻辑需要支持“内部停车截断、外部零速补齐”。
+1. 空间阶段的 `vehicleIdsMustDispatch` 和 `vehicleIdsMustNotDispatch` 已接入最终下发判断，新旧完整空间末点采用 2 m 等价阈值。
+2. `waypointSparse` 已采用“内部停车截断、外部零速补齐”，并始终保留完整 `basePath` 末点。
 3. 速度结果复用需要明确历史 `waypointWhole` 的时间对齐方式，以及停止和恢复通行的非对称更新条件。
 4. 最终 response 应只包含确实需要更新的车辆；未更新车辆继续执行上一次下发结果。
 5. 上述修改范围位于可行域规划之后，不能改变每帧的位置匹配和局部可行域生成逻辑。

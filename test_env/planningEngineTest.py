@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from typing import Any, Dict, List
 
@@ -901,15 +902,31 @@ class PlanningEngine:
                 waypointSparseResults[vehicleId] = build_hv_waypoint_sparse(
                     newWaypointWhole,
                     self.vehicleDynamicInfoCaches[vehicleId],
+                    self.vehicleBasePathCaches[vehicleId],
                 )
                 effectiveWaypointWholeResults[vehicleId] = newWaypointWhole
+                self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
                 continue
 
             oldWaypointWhole = self.vehicleWaypointWholeCaches.get(vehicleId)
+            hasHistoricalOutput = (
+                oldWaypointWhole is not None
+                and vehicleId in self.vehicleWaypointSparseCaches
+            )
+            if (vehicleId in self.vehicleIdsMustNotDispatch
+                    and hasHistoricalOutput):
+                alignedOldWaypointWhole = align_old_waypoint_whole(
+                    oldWaypointWhole,
+                    self.vehicleDynamicInfoCaches[vehicleId]['position'],
+                )
+                waypointSparseResults[vehicleId] = (
+                    self.vehicleWaypointSparseCaches[vehicleId].copy()
+                )
+                effectiveWaypointWholeResults[vehicleId] = alignedOldWaypointWhole
+                continue
             useNewWaypointWhole = (
-                    vehicleId in self.vehicleIdsNeedWaypointUpdate
-                    or oldWaypointWhole is None
-                    or vehicleId not in self.vehicleWaypointSparseCaches
+                    vehicleId in self.vehicleIdsMustDispatch
+                    or not hasHistoricalOutput
             )
             if not useNewWaypointWhole:
                 alignedOldWaypointWhole = align_old_waypoint_whole(
@@ -930,6 +947,10 @@ class PlanningEngine:
             waypointSparse = build_waypoint_sparse(
                 waypoint_whole=newWaypointWhole,
                 dynamic_info=self.vehicleDynamicInfoCaches[vehicleId],
+                base_path=self.vehicleBasePathCaches[vehicleId],
+                base_candidates=(
+                    self.vehicleBaseWaypointCandidateCaches.get(vehicleId)
+                ),
                 junction_entrance=self.vehicleJunctionEntranceCaches.get(
                     vehicleId),
                 centerline_dict=CenterlineDict,
@@ -956,10 +977,14 @@ class PlanningEngine:
             ),
         )
 
-        # todo. 十三、按request顺序向长路径response填充短路径结果。
+        # todo. 十三、仅为本帧确实需要更新的车辆填充并返回短路径结果。
+        allResponses = self.responses
+        finalResponses = []
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
-            response = self.responses[requestIndex]
+            if vehicleId not in self.vehicleIdsNeedWaypointUpdate:
+                continue
+            response = allResponses[requestIndex]
             planner = self.drivableAreaPlannerCaches.get(vehicleId)
             if planner is None:
                 responseCenterlines = CenterlineDict
@@ -972,13 +997,7 @@ class PlanningEngine:
                 responseLaneIds = planner.feasibleLaneIds
                 responseJunctionLaneIds = planner.junctionLaneIds
 
-            responseWaypointWhole = self.vehicleWaypointWholeCaches.get(
-                vehicleId)
-            responsePath = (
-                responseWaypointWhole.futurePath
-                if responseWaypointWhole is not None
-                else future_path[vehicleId]
-            )
+            responsePath = self.vehicleBasePathCaches[vehicleId]
             shortPathList, mergePathList = build_response_path_lists(
                 waypoints=waypointSparseResults[vehicleId],
                 planned_path=responsePath,
@@ -991,12 +1010,17 @@ class PlanningEngine:
             )
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList
+            response['pathId'] = (
+                f"{vehicleId}_{request.get('commandId')}_{time.time_ns()}"
+            )
+            finalResponses.append(response)
 
         # todo. 十四、把规划失败的车辆ID单列出来，供下一帧触发长路径重规划。
         self.shortPathFailedVehicleIds = [
             str(response.get('deviceId'))
-            for response in self.responses
+            for response in allResponses
             if not response.get('success', False)
         ]
 
+        self.responses = finalResponses
         return self.responses
