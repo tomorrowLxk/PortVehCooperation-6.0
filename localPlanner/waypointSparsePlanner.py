@@ -8,20 +8,22 @@ from localPlanner.pathGeometry import (
     clean_xy, heading_at_s, point_at_s, polyline_length,
     project_to_polyline,
 )
+from localPlanner.waypointCandidatePlanner import (
+    WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
+    WAYPOINT_CANDIDATE_JUNCTION_EXIT,
+    WAYPOINT_CANDIDATE_PATH_END,
+    WAYPOINT_CANDIDATE_POST_JUNCTION,
+)
 from parameters import (
     JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE,
-    JUNCTION_EXIT_PATH_EXTENSION,
     WAYPOINT_OUTPUT_FORWARD_TIME,
     WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
     WAYPOINT_SPARSE_MIN_SPACING,
-    VEHICLE_LANE_LOCATE_MAX_DISTANCE,
 )
 
 
 def build_waypoint_sparse(
-        waypoint_whole, dynamic_info, base_path, base_candidates,
-        junction_entrance=None, centerline_dict=None,
-        junction_lane_ids=None):
+        waypoint_whole, dynamic_info, base_path, base_candidates):
     """Build an unrestricted sparse sequence over the complete basePath."""
     path = clean_xy(base_path)
     position = np.asarray(dynamic_info['position'], dtype=float)[:2]
@@ -40,10 +42,10 @@ def build_waypoint_sparse(
     stop_s = float(project_to_polyline(
         waypoint_whole.points[-1], path)['s'])
     stop_s = float(np.clip(stop_s, current_s, total))
-    candidate_s = _candidate_s_values(base_candidates, path, total)
-    junction_intervals = _junction_intervals(
-        path, centerline_dict, junction_lane_ids)
-    boundary_points = {}
+    candidate_s, candidate_types = _candidate_data(
+        base_candidates, path, total)
+    junction_intervals = _candidate_junction_intervals(
+        candidate_s, candidate_types)
 
     mandatory = []
     _add_mandatory(mandatory, total, 0)
@@ -53,34 +55,12 @@ def build_waypoint_sparse(
     if output_stop_s >= minimum_output_s - 1e-9:
         _add_mandatory(mandatory, output_stop_s, 1)
 
-    current_junction_exit = _current_junction_exit(
-        path, junction_entrance, centerline_dict)
-    if current_junction_exit is not None:
-        exit_s, exit_point = current_junction_exit
-        if exit_s >= minimum_output_s - 1e-9:
-            _add_mandatory(mandatory, exit_s, 2)
-            boundary_points[round(exit_s, 6)] = exit_point
-        post_exit_s = _post_exit_s(
-            exit_s, total, current_s, junction_intervals)
-        if (post_exit_s > exit_s + 1e-6
-                and post_exit_s >= minimum_output_s - 1e-9):
-            _add_mandatory(mandatory, post_exit_s, 3)
-
-    for entrance_s, exit_s, entrance_point, exit_point in junction_intervals:
-        if exit_s < current_s - 1e-9:
+    for path_s, candidate_type in zip(candidate_s, candidate_types):
+        if path_s < minimum_output_s - 1e-9:
             continue
-        if entrance_s >= minimum_output_s - 1e-9:
-            _add_mandatory(mandatory, entrance_s, 2)
-            boundary_points[round(entrance_s, 6)] = entrance_point
-        if (exit_s >= minimum_output_s - 1e-9
-                and not _terminal_merges_with_exit(total, exit_s)):
-            _add_mandatory(mandatory, exit_s, 2)
-            boundary_points[round(exit_s, 6)] = exit_point
-        post_exit_s = _post_exit_s(
-            exit_s, total, current_s, junction_intervals)
-        if (post_exit_s > exit_s + 1e-6
-                and post_exit_s >= minimum_output_s - 1e-9):
-            _add_mandatory(mandatory, post_exit_s, 3)
+        priority = _candidate_priority(candidate_type, path_s, total)
+        if priority is not None:
+            _add_mandatory(mandatory, path_s, priority)
 
     first_forward_s = _first_forward_s(
         candidate_s, mandatory, minimum_output_s, total)
@@ -95,8 +75,7 @@ def build_waypoint_sparse(
     rows = []
     stop_relative_s = max(0.0, stop_s - current_s)
     for path_s in selected_s:
-        point = boundary_points.get(
-            round(float(path_s), 6), point_at_s(path, path_s))
+        point = point_at_s(path, path_s)
         relative_s = max(0.0, path_s - current_s)
         if relative_s <= stop_relative_s + 1e-6:
             arrival = waypoint_whole.time_at_s(relative_s)
@@ -134,94 +113,77 @@ def _forward_stop(position, heading, forward_distance):
     ]], dtype=float)
 
 
-def _candidate_s_values(base_candidates, path, total):
+def _candidate_data(base_candidates, path, total):
     if base_candidates is None:
         count = max(int(math.ceil(total / WAYPOINT_SPARSE_MIN_SPACING)), 1)
         values = np.linspace(0.0, total, count + 1)
+        candidate_types = np.zeros(len(values), dtype=int)
     else:
         candidates = np.asarray(base_candidates, dtype=float)
         if candidates.ndim == 2 and candidates.shape[1] >= 3:
             values = candidates[:, 2]
+            candidate_types = (
+                np.rint(candidates[:, 3]).astype(int)
+                if candidates.shape[1] >= 4
+                else np.zeros(len(candidates), dtype=int)
+            )
         elif candidates.ndim == 2 and len(candidates):
             values = np.asarray([
                 project_to_polyline(point[:2], path)['s']
                 for point in candidates
             ], dtype=float)
+            candidate_types = np.zeros(len(candidates), dtype=int)
         else:
             values = np.empty(0, dtype=float)
-    values = np.r_[np.asarray(values, dtype=float), total]
-    return np.unique(np.clip(values, 0.0, total))
+            candidate_types = np.empty(0, dtype=int)
+
+    merged = {}
+    for value, candidate_type in zip(values, candidate_types):
+        key = round(float(np.clip(value, 0.0, total)), 6)
+        merged[key] = int(merged.get(key, 0)) | int(candidate_type)
+    end_key = round(float(total), 6)
+    merged[end_key] = int(merged.get(end_key, 0)) | WAYPOINT_CANDIDATE_PATH_END
+    sorted_s = np.asarray(sorted(merged), dtype=float)
+    sorted_types = np.asarray([merged[value] for value in sorted_s], dtype=int)
+    return sorted_s, sorted_types
 
 
-def _junction_intervals(path, centerline_dict, junction_lane_ids):
-    if len(path) < 2 or not centerline_dict or not junction_lane_ids:
-        return []
+def _candidate_junction_intervals(candidate_s, candidate_types):
+    entrances = []
     intervals = []
-    path_min = np.min(path, axis=0)
-    path_max = np.max(path, axis=0)
-    for lane_id in junction_lane_ids:
-        if lane_id not in centerline_dict:
-            continue
-        lane = clean_xy(centerline_dict[lane_id])
-        if len(lane) < 2:
-            continue
-        if (np.any(np.max(lane, axis=0) < path_min)
-                or np.any(np.min(lane, axis=0) > path_max)):
-            continue
-        entrance = project_to_polyline(lane[0], path)
-        exit_point = project_to_polyline(lane[-1], path)
-        entrance_s = float(entrance['s'])
-        exit_s = float(exit_point['s'])
-        if (entrance['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
-                and exit_point['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
-                and exit_s > entrance_s + 1e-6):
-            intervals.append((
-                entrance_s, exit_s, lane[0].copy(), lane[-1].copy(),
-                float(entrance['distance'] + exit_point['distance']),
-            ))
-    intervals.sort(key=lambda item: (item[0], item[1], item[4]))
-    unique = []
-    for interval in intervals:
-        if (not unique
-                or abs(interval[0] - unique[-1][0]) > 1e-6
-                or abs(interval[1] - unique[-1][1]) > 1e-6):
-            unique.append(interval)
-    return [item[:4] for item in unique]
+    for value, candidate_type in zip(candidate_s, candidate_types):
+        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
+            entrances.append(float(value))
+        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
+            for index, entrance_s in enumerate(entrances):
+                if value > entrance_s + 1e-6:
+                    intervals.append((entrance_s, float(value)))
+                    entrances.pop(index)
+                    break
+    return intervals
+
+
+def _candidate_priority(candidate_type, path_s, total):
+    candidate_type = int(candidate_type)
+    if candidate_type & WAYPOINT_CANDIDATE_PATH_END:
+        return 0
+    if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
+        return 2
+    if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
+        if _terminal_merges_with_exit(total, path_s):
+            return None
+        return 2
+    if candidate_type & WAYPOINT_CANDIDATE_POST_JUNCTION:
+        return 3
+    return None
 
 
 def _legal_output_s(value, current_s, junction_intervals):
     value = float(value)
-    for entrance_s, exit_s, _, _ in junction_intervals:
+    for entrance_s, exit_s in junction_intervals:
         if entrance_s + 1e-6 < value < exit_s - 1e-6:
             return entrance_s if current_s < entrance_s else exit_s
     return value
-
-
-def _current_junction_exit(path, junction_entrance, centerline_dict):
-    if not junction_entrance or not centerline_dict:
-        return None
-    lane_id = junction_entrance.get('junctionLaneId')
-    if lane_id not in centerline_dict:
-        return None
-    lane = clean_xy(centerline_dict[lane_id])
-    if len(lane) < 2:
-        return None
-    projection = project_to_polyline(lane[-1], path)
-    if projection['distance'] > VEHICLE_LANE_LOCATE_MAX_DISTANCE:
-        return None
-    return float(projection['s']), lane[-1].copy()
-
-
-def _post_exit_s(exit_s, total, current_s, junction_intervals):
-    remaining_after_exit = total - exit_s
-    if (remaining_after_exit >= JUNCTION_EXIT_PATH_EXTENSION
-            and remaining_after_exit
-            < JUNCTION_EXIT_PATH_EXTENSION
-            + WAYPOINT_SPARSE_MIN_SPACING):
-        value = total
-    else:
-        value = min(exit_s + JUNCTION_EXIT_PATH_EXTENSION, total)
-    return _legal_output_s(value, current_s, junction_intervals)
 
 
 def _terminal_merges_with_exit(total, exit_s):

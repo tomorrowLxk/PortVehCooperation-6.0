@@ -48,7 +48,6 @@ from localPlanner.trafficSignalPathProcessor import (
 from localPlanner.waypointCandidatePlanner import (
     build_base_waypoint_candidates,
     build_future_waypoint_candidates,
-    match_current_junction_lane,
 )
 from localPlanner.waypointWholePlanner import (
     align_old_waypoint_whole,
@@ -88,8 +87,6 @@ class PlanningEngine:
         self.vehicleBaseWaypointCandidateCaches: Dict[str, Any] = {}
         # 与basePath逐点对应的laneId，仅AGV在生成新basePath时计算一次。
         self.vehicleBasePathLaneIDCaches: Dict[str, Any] = {}
-        # 当前位于交叉口内部的车辆：虚拟车道ID及该虚拟车道首点。
-        self.vehicleJunctionEntranceCaches: Dict[str, Any] = {}
         # AGV上一轮实际采用的带时间完整waypoint序列。
         self.vehicleWaypointWholeCaches: Dict[str, Any] = {}
         # AGV上一轮最终向车端发布的稀疏waypoint序列。
@@ -324,7 +321,6 @@ class PlanningEngine:
             self.vehicleBasePathCaches,
             self.vehicleBaseWaypointCandidateCaches,
             self.vehicleBasePathLaneIDCaches,
-            self.vehicleJunctionEntranceCaches,
             self.vehicleWaypointWholeCaches,
             self.vehicleWaypointSparseCaches,
             self.vehicleObstacleCaches,
@@ -703,6 +699,9 @@ class PlanningEngine:
                             and len(self.vehicleRouteCaches[vehicleId])
                             else None
                         ),
+                        base_path_lane_ids=(
+                            self.vehicleBasePathLaneIDCaches[vehicleId]
+                        ),
                     )
                 )
             if agv_spatial_result.reversePointReached:
@@ -727,6 +726,8 @@ class PlanningEngine:
             if hv_spatial_result.candidatePaths:
                 selectedBasePath = hv_spatial_result.candidatePaths[0].copy()
                 self.vehicleBasePathCaches[vehicleId] = selectedBasePath
+                candidateLaneIds = classify_path_lane_ids(
+                    selectedBasePath, CenterlineDict, ConnectorDict)
                 self.vehicleBaseWaypointCandidateCaches[vehicleId] = (
                     build_base_waypoint_candidates(
                         selectedBasePath,
@@ -737,6 +738,7 @@ class PlanningEngine:
                             if vehicleId in self.vehicleRouteCaches
                             else None
                         ),
+                        base_path_lane_ids=candidateLaneIds,
                     )
                 )
 
@@ -752,7 +754,9 @@ class PlanningEngine:
                 position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
                 basePath = np.asarray([[position[0], position[1], 0.0]])
                 self.vehicleBasePathCaches[vehicleId] = basePath.copy()
-                self.vehicleBaseWaypointCandidateCaches[vehicleId] = np.asarray([[position[0], position[1], 0.0]])
+                self.vehicleBaseWaypointCandidateCaches[vehicleId] = np.asarray([[
+                    position[0], position[1], 0.0, 1.0
+                ]])
                 self.vehicleBasePathLaneIDCaches.pop(vehicleId, None)
 
             if staticInfo.get('vehicleType') == 'AGV':
@@ -784,30 +788,12 @@ class PlanningEngine:
                 base_path_lane_ids=basePathLaneIds,
             )
             baseWaypointCandidates = self.vehicleBaseWaypointCandidateCaches[vehicleId]
-            currentJunctionLaneId = match_current_junction_lane(
-                dynamicInfo['position'],
-                dynamicInfo['heading'],
-                signalCenterlines,
-                junctionLaneIds,
-            )
-            if currentJunctionLaneId is None:
-                self.vehicleJunctionEntranceCaches.pop(vehicleId, None)
-            else:
-                self.vehicleJunctionEntranceCaches[vehicleId] = {
-                    'junctionLaneId': currentJunctionLaneId,
-                    'entrancePoint': np.asarray(
-                        signalCenterlines[currentJunctionLaneId],
-                        dtype=float,
-                    )[0, :2].copy(),
-                }
             futureWaypointCandidates[vehicleId] = (
                 build_future_waypoint_candidates(
                     base_path=basePath,
                     base_candidates=baseWaypointCandidates,
                     future_path=future_path[vehicleId],
                     current_position=dynamicInfo['position'],
-                    centerline_dict=signalCenterlines,
-                    junction_lane_ids=junctionLaneIds,
                 )
             )
 
@@ -956,10 +942,6 @@ class PlanningEngine:
                 base_candidates=(
                     self.vehicleBaseWaypointCandidateCaches.get(vehicleId)
                 ),
-                junction_entrance=self.vehicleJunctionEntranceCaches.get(
-                    vehicleId),
-                centerline_dict=CenterlineDict,
-                junction_lane_ids=junctionLaneIds,
             )
             waypointSparseResults[vehicleId] = waypointSparse
             self.vehicleWaypointWholeCaches[vehicleId] = newWaypointWhole
