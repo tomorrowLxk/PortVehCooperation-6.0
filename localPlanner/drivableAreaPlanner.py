@@ -1039,16 +1039,23 @@ class DrivableAreaPlanner:
                 target_stage_index = index
                 break
 
-        # When the fixed look-ahead ends inside a junction lane, include the
-        # complete junction lane and a short part of its downstream exit lane.
-        target_reference_lanes = self.routeStageReferenceLaneIds[
-            target_stage_index
-        ]
-        if any(
-                lane in self.junctionLaneIds
-                for lane in target_reference_lanes):
+        # If the fixed look-ahead ends inside a junction, or less than the
+        # required extension after its exit, keep the whole junction and the
+        # short downstream section in this planning horizon.
+        terminal_junction_stage = None
+        for index in range(current_stage_index, target_stage_index + 1):
+            if not any(
+                    lane in self.junctionLaneIds
+                    for lane in self.routeStageReferenceLaneIds[index]):
+                continue
+            junction_exit_route_s = self.routeStageBounds[index][1]
+            if (target_route_s
+                    <= junction_exit_route_s
+                    + JUNCTION_EXIT_PATH_EXTENSION + 1e-6):
+                terminal_junction_stage = index
+        if terminal_junction_stage is not None:
             junction_exit_route_s = self.routeStageBounds[
-                target_stage_index
+                terminal_junction_stage
             ][1]
             remaining_after_exit = phase_end_s - junction_exit_route_s
             if remaining_after_exit > 1e-6:
@@ -1062,11 +1069,10 @@ class DrivableAreaPlanner:
                         phase_end_s,
                     )
                 for index in range(
-                        target_stage_index, len(self.routeStageBounds)):
+                        terminal_junction_stage, len(self.routeStageBounds)):
                     if (target_route_s
                             <= self.routeStageBounds[index][1] + 1e-6):
                         target_stage_index = index
-
                         break
         if (reverse_point is not None
                 and not self.passedReversePoint

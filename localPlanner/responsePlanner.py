@@ -10,8 +10,6 @@ from localPlanner.pathGeometry import (
 )
 from parameters import (
     RESPONSE_DESTINATION_TOLERANCE,
-    RESPONSE_MERGE_ANGLE_TOLERANCE_RAD,
-    RESPONSE_MERGE_LATERAL_TOLERANCE,
     RESPONSE_TURN_THRESHOLD_RAD,
     RESPONSE_UTURN_THRESHOLD_RAD,
 )
@@ -116,8 +114,11 @@ def build_response_path_lists(
         turn = _normalize_angle(float(end[2] - start[2]))
         action = _segment_action(
             start_lane, middle_lane, end_lane,
-            lane_metadata, connector_dict, junction_lane_ids, turn)
-        direction = _turn_direction(turn)
+            lane_metadata, connector_dict, junction_lane_ids)
+        direction = (
+            _turn_direction(turn)
+            if action == 'TURN' else 'STRAIGHT'
+        )
         final_destination = (
             index == last_movable and _is_final(end[:2], goal)
         )
@@ -221,7 +222,7 @@ def _point_at_prepared(geometry, target_s):
 
 def _segment_action(
         start_lane, middle_lane, end_lane, metadata,
-        connector_dict, junction_lane_ids, turn):
+        connector_dict, junction_lane_ids):
     declared = metadata.get('action')
     if (metadata.get('junctionId') is not None
             or middle_lane in junction_lane_ids
@@ -234,7 +235,7 @@ def _segment_action(
         return 'LANECHANGE'
     if declared in ('LANECHANGE', 'ROUND'):
         return declared
-    return 'TURN' if abs(turn) >= RESPONSE_TURN_THRESHOLD_RAD else 'STRAIGHT'
+    return 'STRAIGHT'
 
 
 def _forward_reachable(start_lane, end_lane, connector_dict):
@@ -308,75 +309,10 @@ def _path_vo(
 
 
 def _merge_paths(short_paths):
-    merged = []
-    for segment in short_paths:
-        if not merged or not _can_merge(merged[-1], segment):
-            merged.append(_copy_path(segment))
-            continue
-        previous = merged[-1]
-        first_length = previous['length']
-        second_length = segment['length']
-        total_length = first_length + second_length
-        if total_length > 1e-9:
-            first_speed = previous['speedLimit']
-            second_speed = segment['speedLimit']
-            if first_speed > 1e-9 and second_speed > 1e-9:
-                total_time = (
-                    first_length / first_speed
-                    + second_length / second_speed
-                )
-                previous['speedLimit'] = total_length / total_time
-            else:
-                previous['speedLimit'] = 0.0
-        previous['points'] = [
-            previous['points'][0],
-            dict(segment['points'][-1]),
-        ]
-        previous['length'] = total_length
-        previous['isFinalDestination'] = (
-            previous['isFinalDestination']
-            or segment['isFinalDestination']
-        )
-    return merged
-
-
-def _can_merge(first, second):
-    if any(first[key] != second[key] for key in (
-            'laneId', 'action', 'direction', 'junctionId')):
-        return False
-    first_stopped = first['speedLimit'] <= 1e-9
-    second_stopped = second['speedLimit'] <= 1e-9
-    if first_stopped != second_stopped:
-        return False
-    if len(first['points']) < 2 or len(second['points']) < 2:
-        return False
-    a0 = first['points'][0]
-    a1 = first['points'][-1]
-    b0 = second['points'][0]
-    b1 = second['points'][-1]
-    if math.hypot(a1['x'] - b0['x'], a1['y'] - b0['y']) > 1e-6:
-        return False
-    first_vector = np.asarray([a1['x'] - a0['x'], a1['y'] - a0['y']])
-    second_vector = np.asarray([b1['x'] - b0['x'], b1['y'] - b0['y']])
-    first_length = float(np.linalg.norm(first_vector))
-    second_length = float(np.linalg.norm(second_vector))
-    if first_length <= 1e-9 or second_length <= 1e-9:
-        return False
-    angle = abs(_normalize_angle(
-        math.atan2(second_vector[1], second_vector[0])
-        - math.atan2(first_vector[1], first_vector[0])
-    ))
-    end_offset = np.asarray([b1['x'] - a0['x'], b1['y'] - a0['y']])
-    lateral = abs(
-        first_vector[0] * end_offset[1]
-        - first_vector[1] * end_offset[0]
-    ) / first_length
-    heading = abs(_normalize_angle(b1['hdg'] - a1['hdg']))
-    return (
-        angle <= RESPONSE_MERGE_ANGLE_TOLERANCE_RAD
-        and lateral <= RESPONSE_MERGE_LATERAL_TOLERANCE
-        and heading <= RESPONSE_MERGE_ANGLE_TOLERANCE_RAD
-    )
+    # Keep the same AB, BC, CD chain as shortPathList.  Merging across a
+    # junction boundary could remove its entrance/exit separator and produce
+    # two consecutive TURN records for the downstream parser.
+    return [_copy_path(segment) for segment in short_paths]
 
 
 def _copy_path(path):
