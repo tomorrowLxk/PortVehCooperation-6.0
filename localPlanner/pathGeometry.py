@@ -5,6 +5,16 @@ import math
 import numpy as np
 
 
+def navigation_heading_to_cartesian(value):
+    '''将正北为0、顺时针增加的接口航向转换为平面直角坐标系航向。'''
+    return (0.5 * math.pi - float(value)) % (2.0 * math.pi)
+
+
+def cartesian_heading_to_navigation(value):
+    '''将平面直角坐标系航向转换为正北为0、顺时针增加的接口航向。'''
+    return (0.5 * math.pi - float(value)) % (2.0 * math.pi)
+
+
 def clean_xy(value):
     points = np.asarray(value, dtype=float)
     if points.ndim != 2 or points.shape[1] < 2:

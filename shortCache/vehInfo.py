@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from localPlanner.pathGeometry import navigation_heading_to_cartesian
 from parameters import (
     DEFAULT_AGV_STATIC_INFO,
     DEFAULT_NON_AGV_STATIC_INFO,
@@ -38,6 +39,11 @@ def update_vehicle_dynamic_cache(all_vehicle_states, previous_cache):
             "direction": int(_field(state, "direction", 1)),
             "_missingFrames": 0,
         }
+
+        updated[str(vehicle_id)]['heading'] = (
+            navigation_heading_to_cartesian(
+                updated[str(vehicle_id)]['heading'])
+        )
 
     for vehicle_id, old_info in (previous_cache or {}).items():
         vehicle_id = str(vehicle_id)

@@ -12,6 +12,7 @@ import numpy as np
 
 from localPlanner.pathGeometry import (
     arc_lengths,
+    cartesian_heading_to_navigation,
     clean_xy,
     heading_at_s,
     point_at_s,
@@ -243,7 +244,7 @@ class VehicleSimulator:
             'posAccuracy': 0,
             'speed': int(np.clip(
                 np.rint(max(0.0, self.speed) / 0.02), 0, 8190)),
-            'heading': float(self.heading),
+            'heading': cartesian_heading_to_navigation(self.heading),
             'direction': 1,
         }
 
@@ -674,7 +675,7 @@ def _position(point, heading):
         'x': float(point[0]),
         'y': float(point[1]),
         'z': 0.0,
-        'hdg': float(heading),
+        'hdg': cartesian_heading_to_navigation(heading),
     }
 
 
