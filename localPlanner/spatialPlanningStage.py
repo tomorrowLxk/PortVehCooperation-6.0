@@ -15,6 +15,7 @@ from localPlanner.pathGeometry import (
     clean_xy,
     point_at_s,
     polyline_length,
+    project_points_to_polyline,
     project_to_polyline,
     resample_polyline,
     slice_polyline,
@@ -31,6 +32,8 @@ from parameters import (
     FUTURE_PATH_POINT_SPACING,
     HV_PREDICTION_HORIZON,
     PATH_CURVE_SAMPLE_SPACING,
+    PATH_CONTINUATION_COMPARE_DISTANCE,
+    PATH_CONTINUATION_MAX_DEVIATION,
     PATH_STATIC_STOP_DISTANCE,
     REVERSE_POINT_REACH_TOLERANCE,
     REVERSE_POINT_STOP_SPEED,
@@ -126,7 +129,7 @@ def plan_hv_spatial(
 def plan_agv_spatial(
         dynamic_info, static_info, planning_max_speed,
         drivable_area_planner, reverse_point, polygons,
-        previous_base_path=None):
+        previous_base_path=None, prefer_previous_path=False):
     """生成一辆AGV的basePath候选，不写接口response。"""
     position = np.asarray(dynamic_info["position"], dtype=float)[:2]
     heading = float(dynamic_info["heading"])
@@ -211,6 +214,9 @@ def plan_agv_spatial(
         )
         for candidate in path_result.candidates
     ]
+    if prefer_previous_path:
+        candidates = _prefer_continuous_candidates(
+            candidates, previous_base_path, position)
     if not candidates:
         candidates = [stationary_path(position)]
     return VehicleSpatialResult(
@@ -224,6 +230,45 @@ def plan_agv_spatial(
         failureReason=path_result.failureReason,
         reversePointReached=reached,
     )
+
+
+def _prefer_continuous_candidates(candidates, previous_base_path, position):
+    "历史路径将执行完时，优先保留仍沿其未执行换道段前进的安全候选。"
+    if previous_base_path is None or len(candidates) < 2:
+        return candidates
+
+    previous = clean_xy(previous_base_path)
+    if len(previous) < 2:
+        return candidates
+    start_s = project_to_polyline(position, previous)['s']
+    remaining = slice_polyline(
+        previous, start_s, polyline_length(previous))
+    compare_length = min(
+        PATH_CONTINUATION_COMPARE_DISTANCE,
+        polyline_length(remaining),
+    )
+    if compare_length <= 1e-6:
+        return candidates
+    reference = slice_polyline(remaining, 0.0, compare_length)
+
+    continuous = []
+    others = []
+    for candidate in candidates:
+        candidate_xy = clean_xy(candidate)
+        candidate_prefix = slice_polyline(
+            candidate_xy,
+            0.0,
+            min(compare_length, polyline_length(candidate_xy)),
+        )
+        max_deviation = float(np.max(
+            project_points_to_polyline(
+                candidate_prefix, reference)['distance']
+        ))
+        if max_deviation <= PATH_CONTINUATION_MAX_DEVIATION + 1e-6:
+            continuous.append(candidate)
+        else:
+            others.append(candidate)
+    return continuous + others if continuous else candidates
 
 
 def _build_agv_reference_line(position, planner, reverse_point):

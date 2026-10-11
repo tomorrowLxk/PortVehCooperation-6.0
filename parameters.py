@@ -69,6 +69,8 @@ HV_PREDICTION_HORIZON = 3.0  # HV按当前速度匀速预测的时间范围，�
 AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE = 20.0  # AGV距离历史完整basePath末端不超过该值时触发空间重规划，单位m
 AGV_BASE_PATH_DEVIATION_THRESHOLD = 6.0  # AGV当前位置距离历史basePath超过该值时触发空间重规划，单位m
 AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD = 2.0  # 新旧完整basePath末端在该距离内视为相同，单位m
+PATH_CONTINUATION_COMPARE_DISTANCE = 20.0  # 历史路径即将执行完时，用于保持换道连续性的前向比较距离，单位m
+PATH_CONTINUATION_MAX_DEVIATION = 1.0  # 新候选在比较区间内允许偏离历史未执行路径的最大距离，单位m
 
 PATH_NODE_SPACING = 4.0  # 每条可行域线生成普通P节点的纵向间距，单位m
 PATH_GRAPH_START_OFFSET = 10.0  # 从车辆当前位置向前首次布置P节点的距离，单位m

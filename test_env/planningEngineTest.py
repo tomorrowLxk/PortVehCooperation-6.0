@@ -632,6 +632,11 @@ class PlanningEngine:
                 reverse_point=self.reversePointCaches.get(vehicleId),
                 polygons=vehi_obstacle_polygons,
                 previous_base_path=oldBasePath,
+                prefer_previous_path=(
+                    historyFinished
+                    and not vehicleDeviated
+                    and not historyBlocked
+                ),
             )
             if not agv_spatial_result.success:
                 failureReason = (
