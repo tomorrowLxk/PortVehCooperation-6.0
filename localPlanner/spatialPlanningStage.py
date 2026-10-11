@@ -156,7 +156,7 @@ def plan_agv_spatial(
             currentSpeed=speed,
             reversePoint=active_reverse_point,
         )
-    except Exception as error:
+    except Exception:
         reason = "DRIVABLE_AREA_PLANNING_FAILED"
         return VehicleSpatialResult(
             success=False,
@@ -189,7 +189,7 @@ def plan_agv_spatial(
             stop_at_route_end=stop_at_route_end,
             continuation_path=previous_base_path,
         )
-    except Exception as error:
+    except Exception:
         reason = "SPATIAL_PATH_SEARCH_FAILED"
         return VehicleSpatialResult(
             success=False,

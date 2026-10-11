@@ -1,8 +1,6 @@
-import pickle
 import time
 
 import numpy as np
-from pathlib import Path
 from typing import Any, Dict, List
 
 from shortCache.vehInfo import update_vehicle_dynamic_cache, update_vehicle_static_cache
@@ -65,22 +63,9 @@ from localPlanner.waypointSparsePlanner import (
 
 class PlanningEngine:
     def __init__(self) -> None:
-        # 占位的，模拟真实系统的地图数据
-        projectRoot = Path(__file__).resolve().parent
-        staticMapDir = projectRoot / "staticMap"
-        centerlineFile = staticMapDir / "centerline_dict0910.pkl"
-        connectorFile = staticMapDir / "connector_dict0910.pkl"
-        with centerlineFile.open("rb") as file:
-            self.centerline_dict = pickle.load(file)
-        with connectorFile.open("rb") as file:
-            self.connector_dict = pickle.load(file)
-
         # 长路径计算结果
         self.responses = None
         self.shortPathFailedVehicleIds = []
-
-        # 必要的，储存地图版本
-        self.map_version = "0910"
 
         # 仅AGV需要DrivableAreaPlanner；Planner内部只持有该任务涉及的局部小地图。
         self.drivableAreaPlannerCaches: Dict[str, Any] = {}
@@ -92,7 +77,7 @@ class PlanningEngine:
 
         # 各车完整basePath；AGV允许跨帧复用，HV每帧重新预测并覆盖。
         self.vehicleBasePathCaches: Dict[str, Any] = {}
-        # 与basePath同时更新和清除的固定空间候选：[x, y, basePathS]。
+        # 与basePath同时更新和清除的固定空间候选：[x, y, basePathS, candidateType]。
         self.vehicleBaseWaypointCandidateCaches: Dict[str, Any] = {}
         # 与basePath逐点对应的laneId，仅AGV在生成新basePath时计算一次。
         self.vehicleBasePathLaneIDCaches: Dict[str, Any] = {}
@@ -611,8 +596,6 @@ class PlanningEngine:
 
         # todo. 五、为必要车辆生成basePath，并更新vehicleBasePathCaches。
         # AGV按request规划候选；HV按本帧全部BSM生成固定长度basePath。
-        AGV_basePathCandidates = {}  # 仅用于调试，vehicleId -> List[Nx3]
-        spatialDrivableLines = {}  # 仅用于调试/可视化
         agvExecutableShortPathVehicleIds = set()
 
         all_obstacle_polygons = build_obstacle_polygons(
@@ -638,7 +621,6 @@ class PlanningEngine:
             (noHistory, historyFinished,
              vehicleDeviated, historyBlocked) = replanFlags
             if not any(replanFlags):
-                AGV_basePathCandidates[vehicleId] = [self.vehicleBasePathCaches[vehicleId].copy()]
                 agvExecutableShortPathVehicleIds.add(vehicleId)
                 continue
 
@@ -668,8 +650,6 @@ class PlanningEngine:
                 )
             else:
                 agvExecutableShortPathVehicleIds.add(vehicleId)
-            AGV_basePathCandidates[vehicleId] = agv_spatial_result.candidatePaths
-            spatialDrivableLines[vehicleId] = agv_spatial_result.drivableLines
             if agv_spatial_result.candidatePaths:
                 selectedBasePath = agv_spatial_result.candidatePaths[0].copy()
                 if noHistory:
@@ -872,19 +852,6 @@ class PlanningEngine:
             },
         }
 
-        self.lastPlanningDiagnostics = {
-            'cooperationBlocks': tuple(
-                tuple(str(vehicleId) for vehicleId in block)
-                for block in cooperationBlocks
-            ),
-            'priorityDecisions': tuple(priorityDecisions),
-            'historicalPriorityEdges': tuple(sorted(historicalPriorityEdges)),
-            'currentPriorityEdges': tuple(sorted(newPriorityEdges)),
-            'drivableLines': spatialDrivableLines,
-
-            'futureWaypointCandidates': futureWaypointCandidates,
-        }
-
         # todo. 十一、根据完整优先级进行速度规划。输出本帧全量newWaypointWhole
         newWaypointWholeResults = {}
         for priorityDecision in priorityDecisions:
@@ -896,11 +863,6 @@ class PlanningEngine:
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
             )
             newWaypointWholeResults.update(blockWaypointWhole)
-        self.lastPlanningDiagnostics['waypointWhole'] = {
-            vehicleId: result.as_dict()
-            for vehicleId, result in newWaypointWholeResults.items()
-        }
-
         # todo. 十二、比较新旧waypointWhole，仅为确实变化的AGV更新waypointSparse。
         waypointSparseResults = {}
         effectiveWaypointWholeResults = {}
@@ -964,11 +926,6 @@ class PlanningEngine:
             self.vehicleWaypointSparseCaches[vehicleId] = waypointSparse.copy()
             self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
             effectiveWaypointWholeResults[vehicleId] = newWaypointWhole
-
-        self.lastPlanningDiagnostics['waypointSparse'] = {
-            vehicleId: value.copy()
-            for vehicleId, value in waypointSparseResults.items()
-        }
 
         # todo. 七（依赖十一、十二阶段结果，延后执行）：根据实际采用的
         # waypointWhole更新死车，协同主动停车不会被误判。

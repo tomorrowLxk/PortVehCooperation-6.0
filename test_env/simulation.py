@@ -231,7 +231,6 @@ class VehicleSimulator:
         self.executionArc = np.asarray([0.0], dtype=float)
         self.speedEndS = np.empty(0, dtype=float)
         self.segmentSpeeds = np.empty(0, dtype=float)
-        self.displayWaypoints = np.empty((0, 3), dtype=float)
         self.displayPathVoPoints = np.empty((0, 2), dtype=float)
         self.history = [np.asarray([self.x, self.y], dtype=float)]
 
@@ -284,19 +283,10 @@ class VehicleSimulator:
         )
 
         if not waypointPoints:
-            self.displayWaypoints = np.empty((0, 3), dtype=float)
             self._stop_at_current_position()
             return
 
         waypointPoints = np.asarray(waypointPoints, dtype=float)
-        if intervalSpeeds:
-            displaySpeeds = np.r_[
-                intervalSpeeds[0], np.asarray(intervalSpeeds, dtype=float)]
-        else:
-            displaySpeeds = np.asarray([0.0])
-        self.displayWaypoints = np.column_stack(
-            (waypointPoints, displaySpeeds))
-
         if len(waypointPoints) == 1:
             executionPath = clean_xy(future_path)
             if len(executionPath) < 2:

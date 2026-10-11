@@ -8,7 +8,6 @@ import numpy as np
 from localPlanner.pathGeometry import (
     arc_lengths,
     clean_xy,
-    point_at_s,
     resample_polyline,
 )
 
