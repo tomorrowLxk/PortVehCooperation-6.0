@@ -99,8 +99,7 @@ for stepIndex in range(maxSteps):
             )
             vehicles[vehicleId].apply_response(
                 response,
-                planningEngine.lastPlanningDiagnostics[
-                    'futurePaths'][vehicleId],
+                planningEngine.vehicleBasePathCaches[vehicleId],
             )
         if PRINT_COOPERATION_BLOCKS:
             print('  cooperationBlocks (high -> low priority):')
