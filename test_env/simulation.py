@@ -244,7 +244,7 @@ class VehicleSimulator:
             'posAccuracy': 0,
             'speed': int(np.clip(
                 np.rint(max(0.0, self.speed) / 0.02), 0, 8190)),
-            'heading': cartesian_heading_to_navigation(self.heading),
+            'heading': float(self.heading % (2.0 * math.pi)),
             'direction': 1,
         }
 
