@@ -232,6 +232,7 @@ class VehicleSimulator:
         self.speedEndS = np.empty(0, dtype=float)
         self.segmentSpeeds = np.empty(0, dtype=float)
         self.displayWaypoints = np.empty((0, 3), dtype=float)
+        self.displayPathVoPoints = np.empty((0, 2), dtype=float)
         self.history = [np.asarray([self.x, self.y], dtype=float)]
 
     def to_bsm(self):
@@ -251,10 +252,16 @@ class VehicleSimulator:
     def apply_response(self, response, future_path):
         waypointPoints = []
         intervalSpeeds = []
+        pathVoFirstPoints = []
 
         for segment in response.get('shortPathList') or ():
             speed = max(0.0, float(segment.get('speedLimit') or 0.0))
-            for rawPoint in segment.get('points') or ():
+            rawPoints = segment.get('points') or ()
+            if rawPoints:
+                firstPoint = rawPoints[0]
+                pathVoFirstPoints.append(np.asarray(
+                    [firstPoint['x'], firstPoint['y']], dtype=float))
+            for rawPoint in rawPoints:
                 point = np.asarray(
                     [rawPoint['x'], rawPoint['y']], dtype=float)
                 if not waypointPoints:
@@ -264,6 +271,11 @@ class VehicleSimulator:
                     continue
                 waypointPoints.append(point)
                 intervalSpeeds.append(speed)
+
+        self.displayPathVoPoints = (
+            np.asarray(pathVoFirstPoints, dtype=float)
+            if pathVoFirstPoints else np.empty((0, 2), dtype=float)
+        )
 
         if not waypointPoints:
             self.displayWaypoints = np.empty((0, 3), dtype=float)
@@ -495,10 +507,10 @@ class SimulationVisualizer:
                 axes.plot(history[:, 0], history[:, 1], color=color,
                           linewidth=0.9, alpha=0.6, zorder=9)
             self._draw_vehicle(axes, vehicle, color)
-            if len(vehicle.displayWaypoints):
+            if len(vehicle.displayPathVoPoints):
                 axes.scatter(
-                    vehicle.displayWaypoints[:, 0],
-                    vehicle.displayWaypoints[:, 1],
+                    vehicle.displayPathVoPoints[:, 0],
+                    vehicle.displayPathVoPoints[:, 1],
                     s=14, color=color, edgecolors='black',
                     linewidths=0.35, zorder=12)
             response = response_map.get(vehicle_id, {})
