@@ -1033,7 +1033,7 @@ class DrivableAreaPlanner:
             self.lastRouteS + DRIVABLE_LINE_FORWARD_LENGTH,
             phase_end_s,
         )
-        target_stage_index = current_stage_index
+        target_stage_index = len(self.routeStageBounds) - 1
         for index in range(current_stage_index, len(self.routeStageBounds)):
             if target_route_s <= self.routeStageBounds[index][1] + 1e-6:
                 target_stage_index = index
@@ -1068,6 +1068,7 @@ class DrivableAreaPlanner:
                         + JUNCTION_EXIT_PATH_EXTENSION,
                         phase_end_s,
                     )
+                target_stage_index = len(self.routeStageBounds) - 1
                 for index in range(
                         terminal_junction_stage, len(self.routeStageBounds)):
                     if (target_route_s
