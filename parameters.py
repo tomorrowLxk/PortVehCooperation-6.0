@@ -49,6 +49,7 @@ WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE = 2.0  # 新旧waypointWhole允许复�
 RESPONSE_DESTINATION_TOLERANCE = 2.0  # waypoint末点进入全局终点该距离内时标记最终到达，单位m
 RESPONSE_TURN_THRESHOLD_RAD = 0.2617993877991494  # 与信控一致，15deg，单位rad
 RESPONSE_UTURN_THRESHOLD_RAD = 2.60  # 短路径段航向变化达到该值时标记为掉头，单位rad
+FINAL_JUNCTION_TRAVERSE_RATIO_THRESHOLD = 0.5  # 全局终点位于交叉口车道内时，超过该纵向比例才视为穿越交叉口
 COOPERATION_PATH_POINT_SPACING = 4.0  # 协同分块内部futurePath降采样间距，单位m
 COOPERATION_LATERAL_MARGIN = 0.3  # 每辆车参与协同分块时增加的侧向安全冗余，单位m
 COOPERATION_PATH_SIMPLIFICATION_MARGIN = 0.5  # 两条4m折线近似产生的合计横向补偿，单位m

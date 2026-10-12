@@ -9,6 +9,7 @@ from localPlanner.pathGeometry import (
     clean_xy,
 )
 from parameters import (
+    FINAL_JUNCTION_TRAVERSE_RATIO_THRESHOLD,
     RESPONSE_DESTINATION_TOLERANCE,
     RESPONSE_TURN_THRESHOLD_RAD,
     RESPONSE_UTURN_THRESHOLD_RAD,
@@ -119,6 +120,9 @@ def build_response_path_lists(
         lane_metadata = metadata.get(middle_lane, {})
         junction_id = lane_metadata.get('junctionId')
         turn = _normalize_angle(float(end[2] - start[2]))
+        final_destination = (
+            index == last_movable and _is_final(end[:2], goal)
+        )
         boundary_action = _boundary_action(
             start_s, end_s, junction_intervals)
         action = (
@@ -128,12 +132,17 @@ def build_response_path_lists(
                 start_lane, middle_lane, end_lane,
                 lane_metadata, connector_dict, junction_lane_ids)
         )
+        if final_destination:
+            action = _final_junction_action(
+                action=action,
+                destination=end[:2],
+                lane_ids=(end_lane, middle_lane, start_lane),
+                centerline_dict=centerline_dict,
+                junction_lane_ids=junction_lane_ids,
+            )
         direction = (
             _turn_direction(turn)
             if action == 'TURN' else 'STRAIGHT'
-        )
-        final_destination = (
-            index == last_movable and _is_final(end[:2], goal)
         )
         segment = _path_vo(
             final_destination=final_destination,
@@ -290,6 +299,35 @@ def _segment_action(
     if declared in ('LANECHANGE', 'ROUND'):
         return declared
     return 'STRAIGHT'
+
+
+def _final_junction_action(
+        action, destination, lane_ids,
+        centerline_dict, junction_lane_ids):
+    "终点位于交叉口车道内时，按已穿越的车道弧长比例判断。"
+    if action != 'TURN':
+        return action
+    junction_ids = {str(lane_id) for lane_id in junction_lane_ids}
+    for lane_id in lane_ids:
+        if lane_id is None or str(lane_id) not in junction_ids:
+            continue
+        line = centerline_dict.get(lane_id)
+        if line is None:
+            continue
+        geometry = _prepare_polyline(line)
+        total_length = float(geometry[3][-1])
+        if total_length <= 1e-9:
+            continue
+        destination_s = float(_project_many(
+            np.asarray(destination, dtype=float)[None, :2], geometry)[0][0])
+        traverse_ratio = float(np.clip(
+            destination_s / total_length, 0.0, 1.0))
+        return (
+            'TURN'
+            if traverse_ratio > FINAL_JUNCTION_TRAVERSE_RATIO_THRESHOLD
+            else 'STRAIGHT'
+        )
+    return action
 
 
 def _forward_reachable(start_lane, end_lane, connector_dict):
