@@ -994,6 +994,8 @@ class PlanningEngine:
                 junction_lane_ids=responseJunctionLaneIds,
                 full_path_list=response.get('fullPathList') or (),
                 request=request,
+                base_candidates=(
+                    self.vehicleBaseWaypointCandidateCaches.get(vehicleId)),
             )
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList

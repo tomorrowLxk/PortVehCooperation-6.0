@@ -12,14 +12,17 @@ from localPlanner.waypointCandidatePlanner import (
     WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
     WAYPOINT_CANDIDATE_JUNCTION_EXIT,
     WAYPOINT_CANDIDATE_PATH_END,
-    WAYPOINT_CANDIDATE_POST_JUNCTION,
 )
 from parameters import (
-    JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE,
+    WAYPOINT_MANDATORY_MERGE_DISTANCE,
     WAYPOINT_OUTPUT_FORWARD_TIME,
     WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
     WAYPOINT_SPARSE_MIN_SPACING,
 )
+
+
+_MANDATORY_STOP = 8
+_MANDATORY_FIRST_FORWARD = 16
 
 
 def build_waypoint_sparse(
@@ -48,24 +51,27 @@ def build_waypoint_sparse(
         candidate_s, candidate_types)
 
     mandatory = []
-    _add_mandatory(mandatory, total, 0)
+    _add_mandatory(
+        mandatory, total, 0, WAYPOINT_CANDIDATE_PATH_END)
 
     output_stop_s = _legal_output_s(
         stop_s, current_s, junction_intervals)
     if output_stop_s >= minimum_output_s - 1e-9:
-        _add_mandatory(mandatory, output_stop_s, 1)
+        _add_mandatory(mandatory, output_stop_s, 1, _MANDATORY_STOP)
 
     for path_s, candidate_type in zip(candidate_s, candidate_types):
         if path_s < minimum_output_s - 1e-9:
             continue
         priority = _candidate_priority(candidate_type, path_s, total)
         if priority is not None:
-            _add_mandatory(mandatory, path_s, priority)
+            _add_mandatory(
+                mandatory, path_s, priority, int(candidate_type))
 
     first_forward_s = _first_forward_s(
         candidate_s, mandatory, minimum_output_s, total)
     if first_forward_s is not None:
-        _add_mandatory(mandatory, first_forward_s, 4)
+        _add_mandatory(
+            mandatory, first_forward_s, 4, _MANDATORY_FIRST_FORWARD)
 
     selected_s = _add_supplemental_points(
         mandatory, candidate_s, minimum_output_s)
@@ -170,11 +176,7 @@ def _candidate_priority(candidate_type, path_s, total):
     if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
         return 2
     if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
-        if _terminal_merges_with_exit(total, path_s):
-            return None
         return 2
-    if candidate_type & WAYPOINT_CANDIDATE_POST_JUNCTION:
-        return 3
     return None
 
 
@@ -186,23 +188,44 @@ def _legal_output_s(value, current_s, junction_intervals):
     return value
 
 
-def _terminal_merges_with_exit(total, exit_s):
-    return total - exit_s <= JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE + 1e-6
-
-
-def _add_mandatory(anchors, value, priority):
+def _add_mandatory(anchors, value, priority, semantic):
     value = float(value)
-    for index, (existing, existing_priority) in enumerate(anchors):
-        if abs(existing - value) <= 1e-6:
+    semantic = int(semantic)
+    for index, (existing, existing_priority, existing_semantic) in enumerate(
+            anchors):
+        if abs(existing - value) <= WAYPOINT_MANDATORY_MERGE_DISTANCE + 1e-9:
+            if _protected_junction_pair(existing_semantic, semantic):
+                continue
             if priority < existing_priority:
-                anchors[index] = (value, priority)
+                existing = value
+                existing_priority = priority
+            anchors[index] = (
+                existing,
+                existing_priority,
+                int(existing_semantic) | semantic,
+            )
             return
-    anchors.append((value, priority))
+    anchors.append((value, priority, semantic))
+
+
+def _protected_junction_pair(first_semantic, second_semantic):
+    first_entrance = bool(
+        int(first_semantic) & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE)
+    first_exit = bool(
+        int(first_semantic) & WAYPOINT_CANDIDATE_JUNCTION_EXIT)
+    second_entrance = bool(
+        int(second_semantic) & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE)
+    second_exit = bool(
+        int(second_semantic) & WAYPOINT_CANDIDATE_JUNCTION_EXIT)
+    return bool(
+        (first_entrance and second_exit)
+        or (first_exit and second_entrance)
+    )
 
 
 def _first_forward_s(candidate_s, mandatory, minimum_output_s, total):
     pool = list(np.asarray(candidate_s, dtype=float))
-    pool.extend(value for value, _ in mandatory)
+    pool.extend(value for value, _, _ in mandatory)
     forward = [
         value for value in pool
         if value >= minimum_output_s - 1e-9
@@ -213,7 +236,7 @@ def _first_forward_s(candidate_s, mandatory, minimum_output_s, total):
 
 
 def _add_supplemental_points(mandatory, candidate_s, minimum_output_s):
-    selected = sorted(value for value, _ in mandatory)
+    selected = sorted(value for value, _, _ in mandatory)
     for value in np.asarray(candidate_s, dtype=float):
         value = float(value)
         if value < minimum_output_s - 1e-9:

@@ -12,12 +12,18 @@ from parameters import (
     RESPONSE_DESTINATION_TOLERANCE,
     RESPONSE_TURN_THRESHOLD_RAD,
     RESPONSE_UTURN_THRESHOLD_RAD,
+    WAYPOINT_MANDATORY_MERGE_DISTANCE,
+)
+from localPlanner.waypointCandidatePlanner import (
+    WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
+    WAYPOINT_CANDIDATE_JUNCTION_EXIT,
 )
 
 
 def build_response_path_lists(
         waypoints, planned_path, centerline_dict, connector_dict,
-        lane_ids, junction_lane_ids, full_path_list, request):
+        lane_ids, junction_lane_ids, full_path_list, request,
+        base_candidates=None):
     """返回单车的(shortPathList, mergePathList)，不改变response状态。"""
     waypoint_array = np.asarray(waypoints, dtype=float)
     path = clean_xy(planned_path)
@@ -30,6 +36,7 @@ def build_response_path_lists(
     candidate_lane_ids = _candidate_lane_ids(
         lane_ids, metadata, request, centerline_dict)
     goal = _request_goal(request)
+    junction_intervals = _candidate_junction_intervals(base_candidates)
     movable = [
         index for index in range(len(waypoint_array) - 1)
         if np.linalg.norm(
@@ -112,9 +119,15 @@ def build_response_path_lists(
         lane_metadata = metadata.get(middle_lane, {})
         junction_id = lane_metadata.get('junctionId')
         turn = _normalize_angle(float(end[2] - start[2]))
-        action = _segment_action(
-            start_lane, middle_lane, end_lane,
-            lane_metadata, connector_dict, junction_lane_ids)
+        boundary_action = _boundary_action(
+            start_s, end_s, junction_intervals)
+        action = (
+            boundary_action
+            if boundary_action is not None
+            else _segment_action(
+                start_lane, middle_lane, end_lane,
+                lane_metadata, connector_dict, junction_lane_ids)
+        )
         direction = (
             _turn_direction(turn)
             if action == 'TURN' else 'STRAIGHT'
@@ -135,6 +148,47 @@ def build_response_path_lists(
         short_paths.append(segment)
 
     return short_paths, _merge_paths(short_paths)
+
+
+def _candidate_junction_intervals(base_candidates):
+    if base_candidates is None:
+        return []
+    candidates = np.asarray(base_candidates, dtype=float)
+    if candidates.ndim != 2 or candidates.shape[1] < 4:
+        return []
+    entrances = []
+    intervals = []
+    for candidate in candidates:
+        value = float(candidate[2])
+        candidate_type = int(round(candidate[3]))
+        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
+            entrances.append(value)
+        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
+            for index, entrance in enumerate(entrances):
+                if value > entrance + 1e-6:
+                    intervals.append((entrance, value))
+                    entrances.pop(index)
+                    break
+    return intervals
+
+
+def _boundary_action(start_s, end_s, junction_intervals):
+    tolerance = WAYPOINT_MANDATORY_MERGE_DISTANCE + 1e-6
+    for entrance_s, exit_s in junction_intervals:
+        if (abs(start_s - entrance_s) <= tolerance
+                and abs(end_s - exit_s) <= tolerance):
+            return 'TURN'
+    starts_at_exit = any(
+        abs(start_s - exit_s) <= tolerance
+        for _, exit_s in junction_intervals
+    )
+    ends_at_entrance = any(
+        abs(end_s - entrance_s) <= tolerance
+        for entrance_s, _ in junction_intervals
+    )
+    if starts_at_exit or ends_at_entrance:
+        return 'STRAIGHT'
+    return None
 
 
 def _candidate_lane_ids(lane_ids, metadata, request, centerline_dict):

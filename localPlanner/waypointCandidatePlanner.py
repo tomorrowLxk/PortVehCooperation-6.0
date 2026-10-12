@@ -10,10 +10,8 @@ from localPlanner.pathGeometry import (
     project_to_polyline,
 )
 from parameters import (
-    JUNCTION_EXIT_PATH_EXTENSION,
     VEHICLE_LANE_LOCATE_MAX_DISTANCE,
     WAYPOINT_CANDIDATE_SPACING,
-    WAYPOINT_SPARSE_MIN_SPACING,
 )
 
 
@@ -21,7 +19,6 @@ WAYPOINT_CANDIDATE_REGULAR = 0
 WAYPOINT_CANDIDATE_PATH_END = 1
 WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE = 2
 WAYPOINT_CANDIDATE_JUNCTION_EXIT = 4
-WAYPOINT_CANDIDATE_POST_JUNCTION = 8
 
 
 def build_base_waypoint_candidates(
@@ -54,12 +51,6 @@ def build_base_waypoint_candidates(
         _merge_candidate_type(
             candidate_types, exit_s,
             WAYPOINT_CANDIDATE_JUNCTION_EXIT)
-        post_exit_s = _post_junction_s(
-            exit_s, total, junction_intervals)
-        if post_exit_s > exit_s + 1e-6:
-            _merge_candidate_type(
-                candidate_types, post_exit_s,
-                WAYPOINT_CANDIDATE_POST_JUNCTION)
     sample_s = np.asarray(sorted(candidate_types), dtype=float)
 
     points = np.asarray([
@@ -211,20 +202,6 @@ def _relevant_junction_lane_ids(
         if lane_id in allowed and lane_id not in output:
             output.append(lane_id)
     return output
-
-
-def _post_junction_s(exit_s, total, junction_intervals):
-    remaining = total - exit_s
-    if (remaining >= JUNCTION_EXIT_PATH_EXTENSION
-            and remaining
-            < JUNCTION_EXIT_PATH_EXTENSION + WAYPOINT_SPARSE_MIN_SPACING):
-        value = total
-    else:
-        value = min(exit_s + JUNCTION_EXIT_PATH_EXTENSION, total)
-    for entrance_s, following_exit_s in junction_intervals:
-        if entrance_s + 1e-6 < value < following_exit_s - 1e-6:
-            return following_exit_s
-    return value
 
 
 def _merge_candidate_type(candidate_types, value, candidate_type):

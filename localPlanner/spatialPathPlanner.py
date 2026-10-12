@@ -17,7 +17,6 @@ from localPlanner.pathGeometry import (
     append_polyline,
     clean_xy,
     frenet_connector,
-    hermite_connector,
     path_curvatures,
     project_points_to_polyline,
     resample_polyline,
@@ -40,6 +39,7 @@ from parameters import (
     PATH_MAX_SIGNATURES_PER_NODE,
     PATH_NODE_SPACING,
     PATH_OBSTACLE_REAR_CLEARANCE,
+    PATH_ON_LINE_HEADING_TOLERANCE_DEG,
     PATH_OUTPUT_POINT_SPACING,
     PATH_REFERENCE_WEIGHT,
     PATH_SEARCH_VALIDATION_BATCH_SIZE,
@@ -675,14 +675,17 @@ def _build_graph(
                 [current_start_s])[1][0]),
         ))
         if (np.linalg.norm(projected_start - current) <= 1e-6
-                and heading_error <= math.radians(1.0)):
+                and heading_error <= math.radians(
+                    PATH_ON_LINE_HEADING_TOLERANCE_DEG)):
             geometry = line_metrics[current_line].slice(
                 current_start_s, target_s)
             geometry[0] = current
         else:
-            geometry = hermite_connector(
+            geometry = line_metrics[current_line].frenet_hermite_connector(
                 current, current_heading,
+                current_start_s,
                 target.point, target.headings[current_line],
+                target_s,
                 PATH_CURVE_SAMPLE_SPACING,
             )
         _add_edge(
@@ -962,7 +965,8 @@ def _same_line_baseline_paths(graph, terminal, dynamic_info):
         math.cos(current_heading - line_headings[0]),
     ))
     if (np.linalg.norm(projected_start[0] - current) <= 1e-6
-            and heading_error <= math.radians(1.0)):
+            and heading_error <= math.radians(
+                PATH_ON_LINE_HEADING_TOLERANCE_DEG)):
         path = metric.slice(start_s, end_s)
         path[0] = current
         return [(path, clean_xy(np.vstack((current, terminal.point))))]
@@ -987,9 +991,11 @@ def _same_line_baseline_paths(graph, terminal, dynamic_info):
     candidates = []
     for anchor in anchors:
         anchor_s = anchor.lineS[current_line]
-        first = hermite_connector(
+        first = metric.frenet_hermite_connector(
             current, current_heading,
+            start_s,
             anchor.point, anchor.headings[current_line],
+            anchor_s,
             PATH_CURVE_SAMPLE_SPACING,
         )
         remainder = metric.slice(anchor_s, end_s)

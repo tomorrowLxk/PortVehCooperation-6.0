@@ -1039,42 +1039,50 @@ class DrivableAreaPlanner:
                 target_stage_index = index
                 break
 
-        # If the fixed look-ahead ends inside a junction, or less than the
-        # required extension after its exit, keep the whole junction and the
-        # short downstream section in this planning horizon.
-        terminal_junction_stage = None
-        for index in range(current_stage_index, target_stage_index + 1):
-            if not any(
-                    lane in self.junctionLaneIds
-                    for lane in self.routeStageReferenceLaneIds[index]):
-                continue
-            junction_exit_route_s = self.routeStageBounds[index][1]
-            if (target_route_s
-                    <= junction_exit_route_s
-                    + JUNCTION_EXIT_PATH_EXTENSION + 1e-6):
-                terminal_junction_stage = index
-        if terminal_junction_stage is not None:
+        # If extending beyond one junction reaches another junction, continue
+        # through the latter as well. This keeps the final junction exit and
+        # its short downstream section in the same planning horizon.
+        for _ in range(len(self.routeStageBounds)):
+            terminal_junction_stage = None
+            for index in range(current_stage_index,
+                               target_stage_index + 1):
+                if not any(
+                        lane in self.junctionLaneIds
+                        for lane in self.routeStageReferenceLaneIds[index]):
+                    continue
+                junction_exit_route_s = self.routeStageBounds[index][1]
+                if (target_route_s
+                        <= junction_exit_route_s
+                        + JUNCTION_EXIT_PATH_EXTENSION + 1e-6):
+                    terminal_junction_stage = index
+            if terminal_junction_stage is None:
+                break
+
             junction_exit_route_s = self.routeStageBounds[
                 terminal_junction_stage
             ][1]
             remaining_after_exit = phase_end_s - junction_exit_route_s
-            if remaining_after_exit > 1e-6:
-                if (remaining_after_exit
-                        <= JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE):
-                    target_route_s = phase_end_s
-                else:
-                    target_route_s = min(
-                        junction_exit_route_s
-                        + JUNCTION_EXIT_PATH_EXTENSION,
-                        phase_end_s,
-                    )
-                target_stage_index = len(self.routeStageBounds) - 1
-                for index in range(
-                        terminal_junction_stage, len(self.routeStageBounds)):
-                    if (target_route_s
-                            <= self.routeStageBounds[index][1] + 1e-6):
-                        target_stage_index = index
-                        break
+            if remaining_after_exit <= 1e-6:
+                break
+            if (remaining_after_exit
+                    <= JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE):
+                next_target_route_s = phase_end_s
+            else:
+                next_target_route_s = min(
+                    junction_exit_route_s + JUNCTION_EXIT_PATH_EXTENSION,
+                    phase_end_s,
+                )
+            if next_target_route_s <= target_route_s + 1e-6:
+                break
+
+            target_route_s = next_target_route_s
+            target_stage_index = len(self.routeStageBounds) - 1
+            for index in range(terminal_junction_stage,
+                               len(self.routeStageBounds)):
+                if (target_route_s
+                        <= self.routeStageBounds[index][1] + 1e-6):
+                    target_stage_index = index
+                    break
         if (reverse_point is not None
                 and not self.passedReversePoint
                 and abs(target_route_s - phase_end_s) <= 1e-6):
