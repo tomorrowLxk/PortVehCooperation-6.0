@@ -96,6 +96,8 @@ class PlanningEngine:
         # 本帧空间重规划已经能够确定必须下发或必须不下发的车辆ID。
         self.vehicleIdsMustDispatch: set[str] = set()
         self.vehicleIdsMustNotDispatch: set[str] = set()
+        # 已经向车端下发最终目的地的车辆；同一任务后续不再重复规划和下发。
+        self.finalDestinationVehicleIds: set[str] = set()
 
         # AV/HV统一内部静态参数：长宽、限速、最小转弯半径等。
         self.vehicleStaticInfoCaches: Dict[str, Any] = {}
@@ -138,6 +140,7 @@ class PlanningEngine:
         )
         if taskChanged:
             self.dxmTaskVehicleIds.discard(vehicleId)
+            self.finalDestinationVehicleIds.discard(vehicleId)
 
         # 同一个调箱门任务仍处于保护区时，冻结短路径内部上下文。
         if (isAgv and planner is not None and not taskChanged
@@ -334,6 +337,7 @@ class PlanningEngine:
                     cache.pop(vehicleId, None)
 
         self.dxmTaskVehicleIds.intersection_update(retainedVehicleIds)
+        self.finalDestinationVehicleIds.intersection_update(retainedVehicleIds)
         priorityNodes = {
             vehicleId: vehicleType
             for vehicleId, vehicleType in self.priorityGraphCache.get(
@@ -605,6 +609,8 @@ class PlanningEngine:
             if request.get('deviceType') != 'AGV':
                 continue
             vehicleId = str(request.get('deviceId'))
+            if vehicleId in self.finalDestinationVehicleIds:
+                continue
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
             staticInfo = self.vehicleStaticInfoCaches[vehicleId]
             vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
@@ -969,6 +975,8 @@ class PlanningEngine:
         finalResponses = []
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
+            if vehicleId in self.finalDestinationVehicleIds:
+                continue
             if vehicleId not in self.vehicleIdsNeedWaypointUpdate:
                 continue
             response = allResponses[requestIndex]
@@ -1003,6 +1011,10 @@ class PlanningEngine:
                 f"{vehicleId}_{request.get('commandId')}_{time.time_ns()}"
             )
             finalResponses.append(response)
+            if any(
+                    path.get('isFinalDestination', False)
+                    for path in shortPathList):
+                self.finalDestinationVehicleIds.add(vehicleId)
 
         # todo. 十四、把规划失败的车辆ID单列出来，供下一帧触发长路径重规划。
         self.shortPathFailedVehicleIds = [
