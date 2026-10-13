@@ -5,7 +5,6 @@ import math
 import numpy as np
 
 from localPlanner.pathGeometry import (
-    cartesian_heading_to_navigation,
     clean_xy,
 )
 from parameters import (
@@ -381,7 +380,7 @@ def _position(row):
         'x': float(row[0]),
         'y': float(row[1]),
         'z': 0.0,
-        'hdg': cartesian_heading_to_navigation(row[2]),
+        'hdg': float(row[2]) % (2.0 * math.pi),
     }
 
 

@@ -57,7 +57,7 @@ def build_future_path(
             stop_s, state = signal
             color = state['color']
             if color in (RED, GREEN):
-                countdown = max(0.0, float(state['time']))
+                countdown = max(0.0, _signal_time(state))
                 eta = _estimate_arrival_time(
                     path,
                     stop_s,
@@ -96,6 +96,16 @@ def classify_path_lane_ids(path, centerline_dict, connector_dict):
         connector_dict,
         sorted(centerline_dict),
     ), dtype=object)
+
+
+def _signal_time(state):
+    value = state.get('time')
+    if value is None:
+        return float('inf')
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float('inf')
 
 
 def _first_signal(

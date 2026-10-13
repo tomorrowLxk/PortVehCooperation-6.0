@@ -12,7 +12,6 @@ import numpy as np
 
 from localPlanner.pathGeometry import (
     arc_lengths,
-    cartesian_heading_to_navigation,
     clean_xy,
     heading_at_s,
     point_at_s,
@@ -683,7 +682,7 @@ def _position(point, heading):
         'x': float(point[0]),
         'y': float(point[1]),
         'z': 0.0,
-        'hdg': cartesian_heading_to_navigation(heading),
+        'hdg': float(heading) % (2.0 * math.pi),
     }
 
 
