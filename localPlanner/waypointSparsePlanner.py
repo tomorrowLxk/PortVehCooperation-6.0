@@ -14,7 +14,9 @@ from localPlanner.waypointCandidatePlanner import (
     WAYPOINT_CANDIDATE_PATH_END,
 )
 from parameters import (
+    WAYPOINT_JUNCTION_ENTRANCE_UPSTREAM_OFFSET,
     WAYPOINT_MANDATORY_MERGE_DISTANCE,
+    WAYPOINT_MANDATORY_MIN_FORWARD_SPACING,
     WAYPOINT_OUTPUT_FORWARD_TIME,
     WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
     WAYPOINT_SPARSE_MIN_SPACING,
@@ -64,8 +66,12 @@ def build_waypoint_sparse(
             continue
         priority = _candidate_priority(candidate_type, path_s, total)
         if priority is not None:
+            mandatory_s = path_s
+            if _is_shiftable_junction_entrance(candidate_type):
+                mandatory_s = _shift_junction_entrance_s(
+                    path_s, mandatory, minimum_output_s)
             _add_mandatory(
-                mandatory, path_s, priority, int(candidate_type))
+                mandatory, mandatory_s, priority, int(candidate_type))
 
     first_forward_s = _first_forward_s(minimum_output_s, total)
     if first_forward_s is not None:
@@ -177,6 +183,35 @@ def _candidate_priority(candidate_type, path_s, total):
     if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
         return 2
     return None
+
+
+def _is_shiftable_junction_entrance(candidate_type):
+    candidate_type = int(candidate_type)
+    return bool(
+        candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE
+        and not candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT
+        and not candidate_type & WAYPOINT_CANDIDATE_PATH_END
+    )
+
+
+def _shift_junction_entrance_s(value, mandatory, minimum_output_s):
+    value = float(value)
+    lower_bound = max(
+        value - WAYPOINT_JUNCTION_ENTRANCE_UPSTREAM_OFFSET,
+        float(minimum_output_s),
+    )
+    previous = [
+        float(minimum_output_s),
+        *(existing for existing, _, _ in mandatory
+          if existing < value - 1e-9),
+    ]
+    previous_s = max(previous)
+    if previous_s < value - 1e-9:
+        lower_bound = max(
+            lower_bound,
+            previous_s + WAYPOINT_MANDATORY_MIN_FORWARD_SPACING,
+        )
+    return min(value, lower_bound)
 
 
 def _legal_output_s(value, current_s, junction_intervals):
