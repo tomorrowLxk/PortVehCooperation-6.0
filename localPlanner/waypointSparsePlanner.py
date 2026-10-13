@@ -24,7 +24,6 @@ from parameters import (
 
 
 _MANDATORY_STOP = 8
-_MANDATORY_FIRST_FORWARD = 16
 
 
 def build_waypoint_sparse(
@@ -72,11 +71,6 @@ def build_waypoint_sparse(
                     path_s, mandatory, minimum_output_s)
             _add_mandatory(
                 mandatory, mandatory_s, priority, int(candidate_type))
-
-    first_forward_s = _first_forward_s(minimum_output_s, total)
-    if first_forward_s is not None:
-        _add_mandatory(
-            mandatory, first_forward_s, 4, _MANDATORY_FIRST_FORWARD)
 
     selected_s = _add_supplemental_points(
         mandatory, candidate_s, minimum_output_s)
@@ -256,9 +250,6 @@ def _protected_junction_pair(first_semantic, second_semantic):
         or (first_exit and second_entrance)
     )
 
-
-def _first_forward_s(minimum_output_s, total):
-    return float(min(minimum_output_s, total))
 
 
 def _add_supplemental_points(mandatory, candidate_s, minimum_output_s):
