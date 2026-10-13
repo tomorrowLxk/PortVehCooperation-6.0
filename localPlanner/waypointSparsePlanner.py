@@ -67,8 +67,7 @@ def build_waypoint_sparse(
             _add_mandatory(
                 mandatory, path_s, priority, int(candidate_type))
 
-    first_forward_s = _first_forward_s(
-        candidate_s, mandatory, minimum_output_s, total)
+    first_forward_s = _first_forward_s(minimum_output_s, total)
     if first_forward_s is not None:
         _add_mandatory(
             mandatory, first_forward_s, 4, _MANDATORY_FIRST_FORWARD)
@@ -223,16 +222,8 @@ def _protected_junction_pair(first_semantic, second_semantic):
     )
 
 
-def _first_forward_s(candidate_s, mandatory, minimum_output_s, total):
-    pool = list(np.asarray(candidate_s, dtype=float))
-    pool.extend(value for value, _, _ in mandatory)
-    forward = [
-        value for value in pool
-        if value >= minimum_output_s - 1e-9
-    ]
-    if forward:
-        return float(min(forward))
-    return float(total)
+def _first_forward_s(minimum_output_s, total):
+    return float(min(minimum_output_s, total))
 
 
 def _add_supplemental_points(mandatory, candidate_s, minimum_output_s):
