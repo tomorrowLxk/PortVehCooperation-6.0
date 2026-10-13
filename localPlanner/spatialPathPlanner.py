@@ -311,23 +311,11 @@ def plan_spatial_path(
         lines, line_lane_segments,
         current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
-        continuation_path,
+        continuation_path, stop_at_route_end,
     )
     searchNodePaths = []
     searchGoals = graph.goals
     terminalLine = graph.primaryLine
-    if stop_at_route_end:
-        terminalLine = min(
-            range(len(graph.lineMetrics)),
-            key=lambda index: (
-                graph.lineMetrics[index].project(reference[-1])['distance'],
-                index,
-            ),
-        )
-        searchGoals = [
-            node_id for node_id in graph.goals
-            if terminalLine in graph.nodes[node_id].lineS
-        ]
 
     immediate = []
     immediate.extend((node_id, "REVERSE_POINT")
@@ -471,7 +459,8 @@ def select_optimal_paths(candidates, reference_line):
 def _build_graph(
         lines, line_lane_segments,
         current, current_heading, reference, polygons,
-        static_info, dynamic_info, reverse_point, continuation_path):
+        static_info, dynamic_info, reverse_point, continuation_path,
+        stop_at_route_end):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
     current_projections = [metric.project(current) for metric in line_metrics]
@@ -575,7 +564,9 @@ def _build_graph(
                 stop_s, {"T"}, f"T{obstacle_index}"))
 
         if not interval_contains(blocked[line_index], total):
-            specifications.append((total, {"G"}, "G"))
+            terminal_roles = {"P"} if stop_at_route_end else {"G"}
+            terminal_suffix = "END" if stop_at_route_end else "G"
+            specifications.append((total, terminal_roles, terminal_suffix))
         values = [item[0] for item in specifications]
         points, headings = metric.values_at(values)
         reference_projections = reference_metric.project_many(points)
@@ -632,8 +623,31 @@ def _build_graph(
         )
         line_nodes[line_index] = unique
 
-    goals, primary_line = _ordered_goals(
-        nodes, line_metrics, current, current_line, reverse_id)
+    if stop_at_route_end and reverse_id is None:
+        primary_line = min(
+            range(len(line_metrics)),
+            key=lambda index: (
+                line_metrics[index].project(reference[-1])['distance'],
+                index,
+            ),
+        )
+        destination_heading = float(reference_metric.headings[-1])
+        destination_id = "D"
+        nodes[destination_id] = _Node(
+            destination_id,
+            reference[-1].copy(),
+            float(reference_metric.total - reference_start_s),
+            0.0,
+            float(reference_metric.total),
+            0.0,
+            {"G"},
+            {},
+            {primary_line: destination_heading},
+        )
+        goals = [destination_id]
+    else:
+        goals, primary_line = _ordered_goals(
+            nodes, line_metrics, current, current_line, reverse_id)
     stops = [
         node.id for node in nodes.values() if "T" in node.roles
     ]
@@ -743,6 +757,41 @@ def _build_graph(
                     source_line, target_line, "CROSS", None, nodes,
                 )
 
+
+    if stop_at_route_end and reverse_id is None:
+        destination_id = goals[0]
+        destination = nodes[destination_id]
+        terminal_sources = list(line_nodes[primary_line])
+        if current_line == primary_line:
+            terminal_sources.insert(0, "S")
+        for source_id in terminal_sources:
+            source = nodes[source_id]
+            if source.roles.intersection({"G", "T", "R"}):
+                continue
+            distance = float(np.linalg.norm(
+                destination.point - source.point))
+            longitudinal = float(
+                destination.referenceS - source.referenceS)
+            if longitudinal <= 1e-6:
+                if distance > 1e-6:
+                    continue
+                geometry = clean_xy(np.vstack((
+                    source.point, destination.point)))
+            else:
+                if (longitudinal
+                        < source.lateral
+                        * PATH_LANE_CHANGE_LONGITUDINAL_RATIO):
+                    continue
+                if (longitudinal
+                        > PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE):
+                    continue
+                geometry = None
+            _add_edge(
+                edges, adjacency, edge_keys,
+                source_id, destination_id,
+                primary_line, primary_line,
+                "GLOBAL", geometry, nodes,
+            )
     graph = _Graph(
         lines, line_metrics, reference_metric,
         nodes, edges, adjacency, goals, stops,
