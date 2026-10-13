@@ -1172,15 +1172,22 @@ def _strict_candidates(
                     and len(safe_node_paths) < PATH_MAX_CANDIDATES):
                 safe_node_paths[signature] = _edge_node_path(graph, edge_ids)
 
+            curvature_edge_ids = edge_ids
+            if edge_ids and graph.edges[edge_ids[-1]].kind == "GLOBAL":
+                curvature_edge_ids = edge_ids[:-1]
+            curvature_path = _join_edges(graph, curvature_edge_ids)
             maximum = float(np.max(path_curvatures(
-                path, PATH_CURVATURE_WINDOW))) if len(path) > 2 else 0.0
+                curvature_path,
+                PATH_CURVATURE_WINDOW,
+            ))) if len(curvature_path) > 2 else 0.0
             limit = (
                 PATH_CURVATURE_TOLERANCE
                 / max(float(static_info["minTurningRadius"]), 1e-6)
             )
             if maximum > limit + 1e-9:
                 pair = _invalid_pair(
-                    graph, edge_ids, polygons, static_info, dynamic_info,
+                    graph, curvature_edge_ids,
+                    polygons, static_info, dynamic_info,
                     collision=False)
                 if pair is not None and pair not in curvature_pairs:
                     curvature_pairs.add(pair)
@@ -1188,9 +1195,11 @@ def _strict_candidates(
                 continue
 
             sampled = resample_polyline(path, PATH_OUTPUT_POINT_SPACING)
+            sampled_curvature_path = resample_polyline(
+                curvature_path, PATH_OUTPUT_POINT_SPACING)
             scored_curvature = float(np.max(path_curvatures(
-                sampled, PATH_CURVATURE_WINDOW
-            ))) if len(sampled) > 2 else 0.0
+                sampled_curvature_path, PATH_CURVATURE_WINDOW
+            ))) if len(sampled_curvature_path) > 2 else 0.0
             valid.append(PathCandidate(
                 sampled, 0.0, signature, scored_curvature,
             ))
@@ -1302,7 +1311,7 @@ def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
             PATH_COLLISION_SAMPLE_SPACING):
         edge.state = "COLLISION_INVALID"
         return
-    if edge.kind == "SAME":
+    if edge.kind in ("SAME", "GLOBAL"):
         edge.state = "VALID"
         return
     maximum = float(np.max(path_curvatures(
