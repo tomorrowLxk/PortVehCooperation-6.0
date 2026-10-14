@@ -11,6 +11,8 @@ from localPlanner.pathGeometry import (
 from localPlanner.waypointCandidatePlanner import (
     WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
     WAYPOINT_CANDIDATE_JUNCTION_EXIT,
+    WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE,
+    WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT,
     WAYPOINT_CANDIDATE_PATH_END,
 )
 from parameters import (
@@ -176,6 +178,10 @@ def _candidate_priority(candidate_type, path_s, total):
         return 2
     if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
         return 2
+    if candidate_type & WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE:
+        return 2
+    if candidate_type & WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT:
+        return 2
     return None
 
 
@@ -222,7 +228,7 @@ def _add_mandatory(anchors, value, priority, semantic):
     for index, (existing, existing_priority, existing_semantic) in enumerate(
             anchors):
         if abs(existing - value) <= WAYPOINT_MANDATORY_MERGE_DISTANCE + 1e-9:
-            if _protected_junction_pair(existing_semantic, semantic):
+            if _protected_boundary_pair(existing_semantic, semantic):
                 continue
             if priority < existing_priority:
                 existing = value
@@ -236,7 +242,7 @@ def _add_mandatory(anchors, value, priority, semantic):
     anchors.append((value, priority, semantic))
 
 
-def _protected_junction_pair(first_semantic, second_semantic):
+def _protected_boundary_pair(first_semantic, second_semantic):
     first_entrance = bool(
         int(first_semantic) & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE)
     first_exit = bool(
@@ -245,10 +251,23 @@ def _protected_junction_pair(first_semantic, second_semantic):
         int(second_semantic) & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE)
     second_exit = bool(
         int(second_semantic) & WAYPOINT_CANDIDATE_JUNCTION_EXIT)
-    return bool(
+    junction_pair = bool(
         (first_entrance and second_exit)
         or (first_exit and second_entrance)
     )
+    first_lane_change_entrance = bool(
+        int(first_semantic) & WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE)
+    first_lane_change_exit = bool(
+        int(first_semantic) & WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT)
+    second_lane_change_entrance = bool(
+        int(second_semantic) & WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE)
+    second_lane_change_exit = bool(
+        int(second_semantic) & WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT)
+    lane_change_pair = bool(
+        (first_lane_change_entrance and second_lane_change_exit)
+        or (first_lane_change_exit and second_lane_change_entrance)
+    )
+    return junction_pair or lane_change_pair
 
 
 

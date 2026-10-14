@@ -707,6 +707,14 @@ class PlanningEngine:
                         base_path_lane_ids=(
                             self.vehicleBasePathLaneIDCaches[vehicleId]
                         ),
+                        lane_change_boundaries=(
+                            agv_spatial_result
+                            .candidateLaneChangeBoundaries[0]
+                            if agv_spatial_result
+                            .candidateLaneChangeBoundaries
+                            else ()
+                        ),
+                        connector_dict=candidateConnectors,
                     )
                 )
             if agv_spatial_result.reversePointReached:
@@ -744,6 +752,7 @@ class PlanningEngine:
                             else None
                         ),
                         base_path_lane_ids=candidateLaneIds,
+                        connector_dict=ConnectorDict,
                     )
                 )
 

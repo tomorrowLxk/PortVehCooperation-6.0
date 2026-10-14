@@ -44,6 +44,7 @@ from parameters import (
 class VehicleSpatialResult:
     success: bool
     candidatePaths: list[np.ndarray] = field(default_factory=list)
+    candidateLaneChangeBoundaries: list[tuple] = field(default_factory=list)
     drivableLines: tuple[np.ndarray, ...] = ()
     searchNodePaths: tuple[np.ndarray, ...] = ()
     failureReason: str | None = None
@@ -206,22 +207,27 @@ def plan_agv_spatial(
         np.asarray(nodePath, dtype=float).copy()
         for nodePath in path_result.searchNodePaths
     )
+    pathCandidates = list(path_result.candidates)
+    if prefer_previous_path:
+        pathCandidates = _prefer_continuous_candidates(
+            pathCandidates, previous_base_path, position)
     candidates = [
         build_speed_limit_path(
             candidate.xy,
             planning_max_speed,
             candidate.terminalStop,
         )
-        for candidate in path_result.candidates
+        for candidate in pathCandidates
     ]
-    if prefer_previous_path:
-        candidates = _prefer_continuous_candidates(
-            candidates, previous_base_path, position)
     if not candidates:
         candidates = [stationary_path(position)]
     return VehicleSpatialResult(
         success=path_result.success,
         candidatePaths=candidates,
+        candidateLaneChangeBoundaries=[
+            candidate.laneChangeBoundaries
+            for candidate in pathCandidates
+        ],
         drivableLines=tuple(
             np.asarray(line, dtype=float).copy()
             for line in drivable_lines
@@ -254,7 +260,8 @@ def _prefer_continuous_candidates(candidates, previous_base_path, position):
     continuous = []
     others = []
     for candidate in candidates:
-        candidate_xy = clean_xy(candidate)
+        candidate_xy = clean_xy(
+            candidate.xy if hasattr(candidate, 'xy') else candidate)
         candidate_prefix = slice_polyline(
             candidate_xy,
             0.0,

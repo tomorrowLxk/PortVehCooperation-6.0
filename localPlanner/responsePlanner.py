@@ -17,6 +17,8 @@ from parameters import (
 from localPlanner.waypointCandidatePlanner import (
     WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
     WAYPOINT_CANDIDATE_JUNCTION_EXIT,
+    WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE,
+    WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT,
 )
 
 
@@ -37,6 +39,8 @@ def build_response_path_lists(
         lane_ids, metadata, request, centerline_dict)
     goal = _request_goal(request)
     junction_intervals = _candidate_junction_intervals(base_candidates)
+    lane_change_intervals = _candidate_lane_change_intervals(
+        base_candidates)
     movable = [
         index for index in range(len(waypoint_array) - 1)
         if np.linalg.norm(
@@ -123,7 +127,8 @@ def build_response_path_lists(
             index == last_movable and _is_final(end[:2], goal)
         )
         boundary_action = _boundary_action(
-            start_s, end_s, junction_intervals)
+            start_s, end_s, junction_intervals,
+            lane_change_intervals)
         action = (
             boundary_action
             if boundary_action is not None
@@ -159,6 +164,22 @@ def build_response_path_lists(
 
 
 def _candidate_junction_intervals(base_candidates):
+    return _candidate_intervals(
+        base_candidates,
+        WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
+        WAYPOINT_CANDIDATE_JUNCTION_EXIT,
+    )
+
+
+def _candidate_lane_change_intervals(base_candidates):
+    return _candidate_intervals(
+        base_candidates,
+        WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE,
+        WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT,
+    )
+
+
+def _candidate_intervals(base_candidates, entrance_type, exit_type):
     if base_candidates is None:
         return []
     candidates = np.asarray(base_candidates, dtype=float)
@@ -169,9 +190,9 @@ def _candidate_junction_intervals(base_candidates):
     for candidate in candidates:
         value = float(candidate[2])
         candidate_type = int(round(candidate[3]))
-        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
+        if candidate_type & entrance_type:
             entrances.append(value)
-        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
+        if candidate_type & exit_type:
             for index, entrance in enumerate(entrances):
                 if value > entrance + 1e-6:
                     intervals.append((entrance, value))
@@ -180,8 +201,13 @@ def _candidate_junction_intervals(base_candidates):
     return intervals
 
 
-def _boundary_action(start_s, end_s, junction_intervals):
+def _boundary_action(
+        start_s, end_s, junction_intervals, lane_change_intervals):
     tolerance = WAYPOINT_MANDATORY_MERGE_DISTANCE + 1e-6
+    for entrance_s, exit_s in lane_change_intervals:
+        if (abs(start_s - entrance_s) <= tolerance
+                and abs(end_s - exit_s) <= tolerance):
+            return 'LANECHANGE'
     for entrance_s, exit_s in junction_intervals:
         if (abs(start_s - entrance_s) <= tolerance
                 and abs(end_s - exit_s) <= tolerance):

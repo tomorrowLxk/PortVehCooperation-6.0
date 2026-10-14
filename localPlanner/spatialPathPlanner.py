@@ -58,6 +58,7 @@ class PathCandidate:
     terminalReason: str | None = None
     degraded: bool = False
     degradationReason: str | None = None
+    laneChangeBoundaries: tuple = ()
 
 
 @dataclass
@@ -352,6 +353,7 @@ def plan_spatial_path(
                 PathCandidate(
                     item.xy, item.score, item.lineSequence,
                     item.maxCurvature, stop, reason,
+                    laneChangeBoundaries=item.laneChangeBoundaries,
                 )
                 for item in candidates
             ]
@@ -398,6 +400,7 @@ def plan_spatial_path(
                 PathCandidate(
                     item.xy, item.score, item.lineSequence,
                     item.maxCurvature, True, "STATIC_OBSTACLE_STOP",
+                    laneChangeBoundaries=item.laneChangeBoundaries,
                 )
                 for item in candidates
             ]
@@ -435,6 +438,7 @@ def select_optimal_paths(candidates, reference_line):
             path, score, candidate.lineSequence, curvature,
             candidate.terminalStop, candidate.terminalReason,
             candidate.degraded, candidate.degradationReason,
+            candidate.laneChangeBoundaries,
         )
         previous = best_by_signature.get(value.lineSequence)
         if previous is None or value.score < previous.score:
@@ -1202,6 +1206,8 @@ def _strict_candidates(
             ))) if len(sampled_curvature_path) > 2 else 0.0
             valid.append(PathCandidate(
                 sampled, 0.0, signature, scored_curvature,
+                laneChangeBoundaries=_edge_lane_change_boundaries(
+                    graph, edge_ids),
             ))
 
         for candidate in valid:
@@ -1291,6 +1297,18 @@ def _edge_node_path(graph, edge_ids):
     return np.asarray([
         graph.nodes[nodeId].point for nodeId in nodeIds
     ], dtype=float)
+
+
+def _edge_lane_change_boundaries(graph, edge_ids):
+    return tuple(
+        (
+            tuple(graph.nodes[edge.source].point[:2]),
+            tuple(graph.nodes[edge.target].point[:2]),
+        )
+        for edge_id in edge_ids
+        for edge in (graph.edges[edge_id],)
+        if edge.kind == "CROSS"
+    )
 
 
 

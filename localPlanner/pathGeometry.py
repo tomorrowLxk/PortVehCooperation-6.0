@@ -228,32 +228,6 @@ def path_curvatures(line, window):
     return np.abs(delta) / np.maximum(upper - lower, 1e-9)
 
 
-def hermite_connector(start, start_heading, end, end_heading, spacing):
-    first = np.asarray(start, dtype=float)[:2]
-    last = np.asarray(end, dtype=float)[:2]
-    chord = float(np.linalg.norm(last - first))
-    if chord <= 1e-9:
-        return first.reshape(1, 2)
-    start_derivative = chord * np.asarray([
-        math.cos(float(start_heading)), math.sin(float(start_heading))
-    ])
-    end_derivative = chord * np.asarray([
-        math.cos(float(end_heading)), math.sin(float(end_heading))
-    ])
-    count = max(3, int(math.ceil(chord / max(float(spacing), 0.1))) + 1)
-    parameter = np.linspace(0.0, 1.0, count)
-    h00 = 2.0 * parameter ** 3 - 3.0 * parameter ** 2 + 1.0
-    h10 = parameter ** 3 - 2.0 * parameter ** 2 + parameter
-    h01 = -2.0 * parameter ** 3 + 3.0 * parameter ** 2
-    h11 = parameter ** 3 - parameter ** 2
-    return (
-        h00[:, None] * first
-        + h10[:, None] * start_derivative
-        + h01[:, None] * last
-        + h11[:, None] * end_derivative
-    )
-
-
 def frenet_hermite_connector(
         start, start_heading, start_reference_s,
         end, end_heading, end_reference_s,
