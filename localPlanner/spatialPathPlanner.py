@@ -1334,6 +1334,15 @@ def _edge_lane_change_boundaries(graph, edge_ids):
                 tuple(graph.nodes["S"].point[:2]),
                 tuple(graph.nodes[edge.target].point[:2]),
             ))
+        elif (edge.source == 'S'
+              and edge.kind in ('SAME', 'CONTINUATION')
+              and graph.lineMetrics[edge.targetLine].project(
+                  graph.nodes['S'].point)['distance']
+              > PATH_G0_LATERAL_TOLERANCE):
+            boundaries.append((
+                tuple(graph.nodes['S'].point[:2]),
+                tuple(graph.nodes[edge.target].point[:2]),
+            ))
     return tuple(boundaries)
 
 
