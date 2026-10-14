@@ -128,6 +128,17 @@ class DrivableAreaPlanner:
                 break
             lane_ids.pop(0)
 
+        # 长路径车道序列可能包含route终点尚未实际进入的下游车道。
+        # 这类车道在终点阶段没有有效纵向区间，不应参与完整可行域构建。
+        while len(lane_ids) > 1:
+            last_line = np.asarray(
+                centerline_dict[lane_ids[-1]], dtype=float
+            )[:, :2]
+            last_s = self._project_to_line(route[-1], last_line)[0]
+            if last_s > 1e-6:
+                break
+            lane_ids.pop()
+
         normalized_connectors = {}
         for lane_id, source in connector_dict.items():
             info = dict(source)
