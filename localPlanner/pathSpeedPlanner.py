@@ -13,7 +13,9 @@ def build_speed_limit_path(path, maximum_speed, terminal_stop=False):
     points = clean_xy(path)
     if len(points) == 1:
         points = np.repeat(points, 2, axis=0)
-    curvature = path_curvatures(points, PATH_CURVATURE_WINDOW)
+        curvature = np.zeros(2, dtype=float)
+    else:
+        curvature = path_curvatures(points, PATH_CURVATURE_WINDOW)
     speeds = np.full(len(points), max(0.0, float(maximum_speed)), dtype=float)
     curved = curvature > 1e-6
     if np.any(curved):
