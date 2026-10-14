@@ -285,7 +285,7 @@ def plan_spatial_path(
         drivable_lines, current_position, current_heading, reference_line,
         polygons, vehicle_static_info, vehicle_dynamic_info,
         reverse_point=None, stop_at_route_end=False,
-        continuation_path=None):
+        continuation_path=None, destination_lane_id=None):
     current = np.asarray(current_position, dtype=float)[:2]
     reference = clean_xy(reference_line)
     if (stop_at_route_end and len(reference) == 1
@@ -312,7 +312,7 @@ def plan_spatial_path(
         lines, line_lane_segments,
         current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
-        continuation_path, stop_at_route_end,
+        continuation_path, stop_at_route_end, destination_lane_id,
     )
     searchNodePaths = []
     searchGoals = graph.goals
@@ -373,6 +373,11 @@ def plan_spatial_path(
                 current, graph.nodes[goal_id].point, reference, polygons,
                 vehicle_static_info, vehicle_dynamic_info,
                 terminal_reason=terminal_reason,
+                lane_change_boundaries=(
+                    ((tuple(current),
+                      tuple(graph.nodes[goal_id].point)),)
+                    if "LC" in graph.nodes[goal_id].roles else ()
+                ),
             )
             return PathPlanResult(
                 True, [fallback],
@@ -464,7 +469,7 @@ def _build_graph(
         lines, line_lane_segments,
         current, current_heading, reference, polygons,
         static_info, dynamic_info, reverse_point, continuation_path,
-        stop_at_route_end):
+        stop_at_route_end, destination_lane_id):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
     current_projections = [metric.project(current) for metric in line_metrics]
@@ -628,8 +633,23 @@ def _build_graph(
         line_nodes[line_index] = unique
 
     if stop_at_route_end and reverse_id is None:
+        destination_lane_id = (
+            None if destination_lane_id is None
+            else str(destination_lane_id)
+        )
+        destination_lines = [
+            line_index
+            for line_index, segments in enumerate(line_lane_segments)
+            if any(
+                str(segment.laneId) == destination_lane_id
+                for segment in segments
+            )
+        ]
+        destination_needs_lane_change = (
+            destination_lane_id is not None and not destination_lines
+        )
         primary_line = min(
-            range(len(line_metrics)),
+            destination_lines or range(len(line_metrics)),
             key=lambda index: (
                 line_metrics[index].project(reference[-1])['distance'],
                 index,
@@ -644,7 +664,7 @@ def _build_graph(
             0.0,
             float(reference_metric.total),
             0.0,
-            {"G"},
+            {"G", "LC"} if destination_needs_lane_change else {"G"},
             {},
             {primary_line: destination_heading},
         )
@@ -1300,15 +1320,21 @@ def _edge_node_path(graph, edge_ids):
 
 
 def _edge_lane_change_boundaries(graph, edge_ids):
-    return tuple(
-        (
-            tuple(graph.nodes[edge.source].point[:2]),
-            tuple(graph.nodes[edge.target].point[:2]),
-        )
-        for edge_id in edge_ids
-        for edge in (graph.edges[edge_id],)
-        if edge.kind == "CROSS"
-    )
+    boundaries = []
+    for edge_id in edge_ids:
+        edge = graph.edges[edge_id]
+        if edge.kind == "CROSS":
+            boundaries.append((
+                tuple(graph.nodes[edge.source].point[:2]),
+                tuple(graph.nodes[edge.target].point[:2]),
+            ))
+        elif (edge.kind == "GLOBAL"
+              and "LC" in graph.nodes[edge.target].roles):
+            boundaries.append((
+                tuple(graph.nodes["S"].point[:2]),
+                tuple(graph.nodes[edge.target].point[:2]),
+            ))
+    return tuple(boundaries)
 
 
 
@@ -1409,7 +1435,7 @@ def _invalid_pair(
 
 def _frenet_fallback(
         current, target, reference, polygons, static_info, dynamic_info,
-        terminal_reason):
+        terminal_reason, lane_change_boundaries=()):
     path = frenet_connector(
         current, target, reference, PATH_OUTPUT_POINT_SPACING)
     stop_s = first_polygon_stop_s(
@@ -1431,4 +1457,5 @@ def _frenet_fallback(
         resample_polyline(path, PATH_OUTPUT_POINT_SPACING),
         0.0, ("FRENET",), maximum, stop, reason,
         True, "FRENET_FALLBACK",
+        laneChangeBoundaries=lane_change_boundaries,
     )

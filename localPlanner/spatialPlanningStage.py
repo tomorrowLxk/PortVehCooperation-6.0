@@ -183,6 +183,10 @@ def plan_agv_spatial(
             current_position=position,
             current_heading=heading,
             reference_line=reference_line,
+            destination_lane_id=(
+                drivable_area_planner.referLaneIds[-1]
+                if drivable_area_planner.referLaneIds else None
+            ),
             polygons=polygons,
             vehicle_static_info=static_info,
             vehicle_dynamic_info=dynamic_info,
