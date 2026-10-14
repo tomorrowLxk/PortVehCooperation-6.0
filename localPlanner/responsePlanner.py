@@ -60,8 +60,7 @@ def build_response_path_lists(
                 _position(waypoint_array[0]),
             ],
             speed=waypoint_array[0, 3],
-            action=_declared_action(
-                lane_metadata, lane_id, junction_lane_ids),
+            action=_declared_action(lane_id, junction_lane_ids),
             direction='STRAIGHT',
             length=0.0,
             junction_id=lane_metadata.get('junctionId'),
@@ -132,9 +131,7 @@ def build_response_path_lists(
         action = (
             boundary_action
             if boundary_action is not None
-            else _segment_action(
-                start_lane, middle_lane, end_lane,
-                lane_metadata, junction_lane_ids)
+            else _segment_action(middle_lane, junction_lane_ids)
         )
         if final_destination:
             action = _final_junction_action(
@@ -308,16 +305,9 @@ def _point_at_prepared(geometry, target_s):
     return points[index] + ratio * segments[index]
 
 
-def _segment_action(
-        start_lane, middle_lane, end_lane, metadata,
-        junction_lane_ids):
-    declared = metadata.get('action')
-    if (metadata.get('junctionId') is not None
-            or middle_lane in junction_lane_ids
-            or declared == 'TURN'):
+def _segment_action(middle_lane, junction_lane_ids):
+    if middle_lane in junction_lane_ids:
         return 'TURN'
-    if declared in ('LANECHANGE', 'ROUND'):
-        return declared
     return 'STRAIGHT'
 
 
@@ -350,12 +340,10 @@ def _final_junction_action(
     return action
 
 
-def _declared_action(metadata, lane_id, junction_lane_ids):
-    if (metadata.get('junctionId') is not None
-            or lane_id in junction_lane_ids
-            or metadata.get('action') == 'TURN'):
+def _declared_action(lane_id, junction_lane_ids):
+    if lane_id in junction_lane_ids:
         return 'TURN'
-    return metadata.get('action') or 'STRAIGHT'
+    return 'STRAIGHT'
 
 
 def _turn_direction(turn):
