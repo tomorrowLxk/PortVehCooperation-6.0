@@ -52,6 +52,8 @@ def build_waypoint_sparse(
         base_candidates, path, total)
     junction_intervals = _candidate_junction_intervals(
         candidate_s, candidate_types)
+    lane_change_intervals = _candidate_lane_change_intervals(
+        candidate_s, candidate_types)
 
     mandatory = []
     _add_mandatory(
@@ -61,6 +63,16 @@ def build_waypoint_sparse(
         stop_s, current_s, junction_intervals)
     if output_stop_s >= minimum_output_s - 1e-9:
         _add_mandatory(mandatory, output_stop_s, 1, _MANDATORY_STOP)
+
+    for entrance_s, exit_s in lane_change_intervals:
+        effective_entrance_s = max(entrance_s, minimum_output_s)
+        if effective_entrance_s < exit_s - 1e-6:
+            _add_mandatory(
+                mandatory,
+                effective_entrance_s,
+                2,
+                WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE,
+            )
 
     for path_s, candidate_type in zip(candidate_s, candidate_types):
         if path_s < minimum_output_s - 1e-9:
@@ -156,12 +168,31 @@ def _candidate_data(base_candidates, path, total):
 
 
 def _candidate_junction_intervals(candidate_s, candidate_types):
+    return _candidate_intervals(
+        candidate_s,
+        candidate_types,
+        WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
+        WAYPOINT_CANDIDATE_JUNCTION_EXIT,
+    )
+
+
+def _candidate_lane_change_intervals(candidate_s, candidate_types):
+    return _candidate_intervals(
+        candidate_s,
+        candidate_types,
+        WAYPOINT_CANDIDATE_LANE_CHANGE_ENTRANCE,
+        WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT,
+    )
+
+
+def _candidate_intervals(
+        candidate_s, candidate_types, entrance_type, exit_type):
     entrances = []
     intervals = []
     for value, candidate_type in zip(candidate_s, candidate_types):
-        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
+        if candidate_type & entrance_type:
             entrances.append(float(value))
-        if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
+        if candidate_type & exit_type:
             for index, entrance_s in enumerate(entrances):
                 if value > entrance_s + 1e-6:
                     intervals.append((entrance_s, float(value)))

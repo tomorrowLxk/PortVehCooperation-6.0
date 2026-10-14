@@ -134,7 +134,7 @@ def build_response_path_lists(
             if boundary_action is not None
             else _segment_action(
                 start_lane, middle_lane, end_lane,
-                lane_metadata, connector_dict, junction_lane_ids)
+                lane_metadata, junction_lane_ids)
         )
         if final_destination:
             action = _final_junction_action(
@@ -204,14 +204,14 @@ def _candidate_intervals(base_candidates, entrance_type, exit_type):
 def _boundary_action(
         start_s, end_s, junction_intervals, lane_change_intervals):
     tolerance = WAYPOINT_MANDATORY_MERGE_DISTANCE + 1e-6
-    for entrance_s, exit_s in lane_change_intervals:
-        if (abs(start_s - entrance_s) <= tolerance
-                and abs(end_s - exit_s) <= tolerance):
-            return 'LANECHANGE'
     for entrance_s, exit_s in junction_intervals:
-        if (abs(start_s - entrance_s) <= tolerance
-                and abs(end_s - exit_s) <= tolerance):
+        overlap = min(end_s, exit_s) - max(start_s, entrance_s)
+        if overlap > 1e-6:
             return 'TURN'
+    for entrance_s, exit_s in lane_change_intervals:
+        overlap = min(end_s, exit_s) - max(start_s, entrance_s)
+        if overlap > 1e-6:
+            return 'LANECHANGE'
     starts_at_exit = any(
         abs(start_s - exit_s) <= tolerance
         for _, exit_s in junction_intervals
@@ -310,17 +310,12 @@ def _point_at_prepared(geometry, target_s):
 
 def _segment_action(
         start_lane, middle_lane, end_lane, metadata,
-        connector_dict, junction_lane_ids):
+        junction_lane_ids):
     declared = metadata.get('action')
     if (metadata.get('junctionId') is not None
             or middle_lane in junction_lane_ids
             or declared == 'TURN'):
         return 'TURN'
-    if (start_lane is not None and end_lane is not None
-            and start_lane != end_lane
-            and not _forward_reachable(
-                start_lane, end_lane, connector_dict)):
-        return 'LANECHANGE'
     if declared in ('LANECHANGE', 'ROUND'):
         return declared
     return 'STRAIGHT'
@@ -353,20 +348,6 @@ def _final_junction_action(
             else 'STRAIGHT'
         )
     return action
-
-
-def _forward_reachable(start_lane, end_lane, connector_dict):
-    visited = {start_lane}
-    pending = [start_lane]
-    while pending:
-        lane_id = pending.pop()
-        for successor in connector_dict[lane_id]['successor']:
-            if successor == end_lane:
-                return True
-            if successor not in visited:
-                visited.add(successor)
-                pending.append(successor)
-    return False
 
 
 def _declared_action(metadata, lane_id, junction_lane_ids):

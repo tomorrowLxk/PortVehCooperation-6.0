@@ -12,7 +12,6 @@ from localPlanner.pathGeometry import (
 from parameters import (
     VEHICLE_LANE_LOCATE_MAX_DISTANCE,
     WAYPOINT_CANDIDATE_SPACING,
-    WAYPOINT_LANE_CHANGE_CENTERLINE_TOLERANCE,
 )
 
 
@@ -27,7 +26,7 @@ WAYPOINT_CANDIDATE_LANE_CHANGE_EXIT = 16
 def build_base_waypoint_candidates(
         base_path, centerline_dict, junction_lane_ids,
         final_destination=None, base_path_lane_ids=None,
-        lane_change_boundaries=None, connector_dict=None):
+        lane_change_boundaries=None):
     """普通区域等距取点；路口和换道内部只保留各自边界。"""
     path = np.asarray(base_path, dtype=float)
     path_xy = clean_xy(path)
@@ -57,15 +56,6 @@ def build_base_waypoint_candidates(
             WAYPOINT_CANDIDATE_JUNCTION_EXIT)
     lane_change_intervals = _lane_change_intervals(
         path_xy, lane_change_boundaries)
-    if (not lane_change_intervals
-            and base_path_lane_ids is not None
-            and connector_dict is not None):
-        lane_change_intervals = _inferred_lane_change_intervals(
-            path_xy,
-            base_path_lane_ids,
-            centerline_dict,
-            connector_dict,
-        )
     for entrance_s, exit_s in lane_change_intervals:
         for value in tuple(candidate_types):
             if (entrance_s + 1e-6 < value < exit_s - 1e-6
@@ -231,75 +221,6 @@ def _lane_change_intervals(path, lane_change_boundaries):
         (round(entrance_s, 6), round(exit_s, 6))
         for entrance_s, exit_s in intervals
     ))
-
-
-def _inferred_lane_change_intervals(
-        path, path_lane_ids, centerline_dict, connector_dict):
-    """从最终basePath识别同一可行域线内真实发生的换道区间。"""
-    lane_ids = np.asarray(path_lane_ids, dtype=object)
-    if len(lane_ids) != len(path):
-        return []
-
-    arc = np.concatenate((
-        [0.0], np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))
-    ))
-    intervals = []
-    previous_index = next(
-        (index for index, lane_id in enumerate(lane_ids)
-         if lane_id is not None),
-        None,
-    )
-    if previous_index is None:
-        return intervals
-
-    for index in range(previous_index + 1, len(lane_ids)):
-        if lane_ids[index] is None or lane_ids[index] == lane_ids[previous_index]:
-            continue
-        old_lane = str(lane_ids[previous_index])
-        new_lane = str(lane_ids[index])
-        previous_index = index
-        if _forward_reachable(old_lane, new_lane, connector_dict):
-            continue
-
-        old_line = clean_xy(centerline_dict[old_lane])
-        new_line = clean_xy(centerline_dict[new_lane])
-        old_distance = project_points_to_polyline(path, old_line)["distance"]
-        new_distance = project_points_to_polyline(path, new_line)["distance"]
-
-        entrance_index = index - 1
-        while (entrance_index > 0
-               and old_distance[entrance_index]
-               > WAYPOINT_LANE_CHANGE_CENTERLINE_TOLERANCE):
-            entrance_index -= 1
-        exit_index = index
-        while (exit_index < len(path) - 1
-               and new_distance[exit_index]
-               > WAYPOINT_LANE_CHANGE_CENTERLINE_TOLERANCE):
-            exit_index += 1
-
-        entrance_s = float(arc[entrance_index])
-        exit_s = float(arc[exit_index])
-        if exit_s > entrance_s + 1e-6:
-            intervals.append((entrance_s, exit_s))
-
-    return sorted(set(
-        (round(entrance_s, 6), round(exit_s, 6))
-        for entrance_s, exit_s in intervals
-    ))
-
-
-def _forward_reachable(start_lane, end_lane, connector_dict):
-    visited = {start_lane}
-    pending = [start_lane]
-    while pending:
-        lane_id = pending.pop()
-        for successor in connector_dict[lane_id]["successor"]:
-            if successor == end_lane:
-                return True
-            if successor not in visited:
-                visited.add(successor)
-                pending.append(successor)
-    return False
 
 
 def _relevant_junction_lane_ids(

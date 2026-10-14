@@ -40,7 +40,6 @@ VEHICLE_LANE_LOCATE_TOPOLOGY_DEPTH = 2  # 后续帧从上一匹配车道向左�
 FUTURE_PATH_LENGTH = 80.0  # 本帧用于分组、HV预测和空间规划的前向参考线长度，单位m
 FUTURE_PATH_POINT_SPACING = 1.0  # futurePath重采样点间距，单位m
 WAYPOINT_CANDIDATE_SPACING = 2.0  # 普通道路上相邻waypoint候选点的弧长间距，单位m
-WAYPOINT_LANE_CHANGE_CENTERLINE_TOLERANCE = 0.5  # 换道入口/出口视为贴合车道中心线的距离阈值，单位m
 WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE = 2.0  # 首个下发点至少位于车辆前方该距离，单位m
 WAYPOINT_OUTPUT_FORWARD_TIME = 1.0  # 首个下发点随当前车速前移的最小时间，单位s
 WAYPOINT_SPARSE_MIN_SPACING = 10.0  # 非强制waypointSparse与已有下发点的最小沿路径间距，单位m

@@ -714,7 +714,6 @@ class PlanningEngine:
                             .candidateLaneChangeBoundaries
                             else ()
                         ),
-                        connector_dict=candidateConnectors,
                     )
                 )
             if agv_spatial_result.reversePointReached:
@@ -752,7 +751,6 @@ class PlanningEngine:
                             else None
                         ),
                         base_path_lane_ids=candidateLaneIds,
-                        connector_dict=ConnectorDict,
                     )
                 )
 
