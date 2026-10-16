@@ -806,9 +806,6 @@ def _build_graph(
                         < source.lateral
                         * PATH_LANE_CHANGE_LONGITUDINAL_RATIO):
                     continue
-                if (longitudinal
-                        > PATH_MAX_LANE_CHANGE_LONGITUDINAL_DISTANCE):
-                    continue
                 geometry = None
             _add_edge(
                 edges, adjacency, edge_keys,
