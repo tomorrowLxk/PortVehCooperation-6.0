@@ -411,6 +411,11 @@ def _spatially_consistent_whole_paths(
         old_path = slice_polyline(old_path, current_s, arc_lengths(old_path)[-1])
     old_path[0] = np.asarray(current_position, dtype=float)[:2]
     tolerance = WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION
+    if len(old_path) == len(new_path) and np.all(
+            np.sum((old_path - new_path) ** 2, axis=1)
+            <= tolerance ** 2 + 1e-9):
+        # Corresponding segments remain within tolerance under interpolation.
+        return True
     return (
         _path_within_distance(old_path, new_path, tolerance)
         and _path_within_distance(new_path, old_path, tolerance)
