@@ -7,6 +7,7 @@ import numpy as np
 
 from localPlanner.pathGeometry import (
     arc_lengths,
+    clean_xy,
     project_to_polyline,
     slice_polyline,
 )
@@ -21,6 +22,7 @@ from parameters import (
     COOPERATION_TIME_CLEARANCE,
     WAYPOINT_CANDIDATE_SPACING,
     WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
+    WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION,
     WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE,
 )
 
@@ -369,17 +371,66 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
     )
 
 
+def _path_within_distance(source, target, max_distance):
+    """Check vertices and short interpolated sections against another polyline."""
+    source_s = arc_lengths(source)
+    samples = np.unique(np.r_[
+        source_s,
+        np.arange(0.0, source_s[-1], max_distance),
+    ])
+    points, _ = _path_states_at_s(source, source_s, samples)
+    if len(target) == 1:
+        return bool(np.all(np.sum((points - target[0]) ** 2, axis=1)
+                           <= max_distance ** 2 + 1e-9))
+
+    starts = target[:-1]
+    segments = target[1:] - starts
+    lengths_sq = np.sum(segments ** 2, axis=1)
+    relative = points[:, None, :] - starts[None, :, :]
+    fractions = np.divide(
+        np.sum(relative * segments[None, :, :], axis=2),
+        lengths_sq[None, :],
+        out=np.zeros((len(points), len(segments)), dtype=float),
+        where=lengths_sq[None, :] > 1e-12,
+    )
+    closest = starts[None, :, :] + np.clip(fractions, 0.0, 1.0)[:, :, None] * segments
+    distances_sq = np.sum((points[:, None, :] - closest) ** 2, axis=2)
+    return bool(np.all(np.min(distances_sq, axis=1)
+                       <= max_distance ** 2 + 1e-9))
+
+
+def _spatially_consistent_whole_paths(
+        old_whole, new_whole, current_position):
+    """Compare complete futurePath geometry, independent of speed stop points."""
+    old_path = clean_xy(old_whole.futurePath)
+    new_path = clean_xy(new_whole.futurePath)
+    if len(old_path) == 0 or len(new_path) == 0:
+        return False
+    if len(old_path) >= 2:
+        current_s = project_to_polyline(current_position, old_path)['s']
+        old_path = slice_polyline(old_path, current_s, arc_lengths(old_path)[-1])
+    old_path[0] = np.asarray(current_position, dtype=float)[:2]
+    tolerance = WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION
+    return (
+        _path_within_distance(old_path, new_path, tolerance)
+        and _path_within_distance(new_path, old_path, tolerance)
+    )
+
+
 def select_effective_waypoint_whole(
         new_whole, old_whole, has_sparse_cache,
         must_dispatch, must_not_dispatch, current_position):
     """沿用下发判据，在本车规划后立即确定后车实际看到的结果。"""
     has_history = old_whole is not None and has_sparse_cache
+    if must_dispatch or not has_history:
+        return new_whole, None
+    if not _spatially_consistent_whole_paths(
+            old_whole, new_whole, current_position):
+        return new_whole, None
     if must_not_dispatch and has_history:
         return align_old_waypoint_whole(
             old_whole, current_position, with_path_s=True,
         )
-    if must_dispatch or not has_history:
-        return new_whole, None
     aligned_old, old_path_s = align_old_waypoint_whole(
         old_whole, current_position, with_path_s=True,
     )
