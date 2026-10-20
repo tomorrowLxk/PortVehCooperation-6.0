@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "5.0",
+  "name": "两车汇入同一终点",
+  "description": "迁移自 2.0 的两车汇入同一终点场景，用于检查让行和终点安全停车。",
+  "map": {
+    "version": "1011",
+    "centerlineFile": "G:\\项目\\港口车辆运动规划\\PortVehCooperation 6.0\\staticMap\\centerline_dict1011.pkl",
+    "connectorFile": "G:\\项目\\港口车辆运动规划\\PortVehCooperation 6.0\\staticMap\\connector_dict1011.pkl",
+    "junctionLaneIds": []
+  },
+  "simulation": {
+    "simulationDtSeconds": 0.2,
+    "planningPeriodSeconds": 1.0,
+    "maxSteps": 1000,
+    "viewMarginMeters": 100.0
+  },
+  "validation": {
+    "completionMode": "shared_terminal_safe",
+    "failOnCollision": true
+  },
+  "environment": {
+    "obstacles": {},
+    "laneSignals": {}
+  },
+  "vehicles": [
+    {
+      "vehicleId": "veh_id1",
+      "deviceType": "AGV",
+      "initialState": {
+        "speedMps": 0.0
+      },
+      "staticInfo": {
+        "lengthMeters": 14.8,
+        "widthMeters": 1.8,
+        "maxSpeedMps": 9.77,
+        "maxAccelerationMps2": 2.0,
+        "maxDecelerationMps2": -4.0,
+        "minTurningRadiusMeters": 10.0,
+        "wheelbaseMeters": 9.2
+      },
+      "request": {
+        "priority": 1,
+        "speedLimitMps": 4.166666666666667,
+        "forbidLaneIdList": [],
+        "laneWhiteList": [],
+        "allowReverse": false,
+        "commandId": "demo-command-1",
+        "requestId": "demo-request-1"
+      },
+      "route": {
+        "laneIds": [
+          "130983067.0.-1.-1"
+        ],
+        "points": [[546.7067959535786,1928.5087312293754],[542.9797,1944.4933]]
+      }
+    }
+  ]
+}

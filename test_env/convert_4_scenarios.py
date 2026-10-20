@@ -13,7 +13,7 @@ SOURCE_MAP_ROOT = Path(
     r'G:\项目\港口车辆运动规划\PortVehCooperation 4.0\staticMap'
 )
 OUTPUT_ROOT = Path(
-    r'G:\项目\港口车辆运动规划\PortVehCooperation 5.0\test_env\demo'
+    r'G:\项目\港口车辆运动规划\PortVehCooperation 6.0\test_env\demo'
 )
 DEFAULT_MAP_VERSION = '0910'
 
