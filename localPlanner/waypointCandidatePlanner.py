@@ -58,9 +58,7 @@ def build_base_waypoint_candidates(
         path_xy, lane_change_boundaries)
     for entrance_s, exit_s in lane_change_intervals:
         for value in tuple(candidate_types):
-            if (entrance_s + 1e-6 < value < exit_s - 1e-6
-                    and candidate_types[value]
-                    == WAYPOINT_CANDIDATE_REGULAR):
+            if entrance_s + 1e-6 < value < exit_s - 1e-6:
                 candidate_types.pop(value)
         _merge_candidate_type(
             candidate_types, entrance_s,
