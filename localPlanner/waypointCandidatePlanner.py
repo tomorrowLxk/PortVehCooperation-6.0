@@ -38,9 +38,18 @@ def build_base_waypoint_candidates(
         ]], dtype=float)
 
     total = polyline_length(path_xy)
+    lane_change_intervals = _lane_change_intervals(
+        path_xy, lane_change_boundaries)
+    regular_s = np.arange(0.0, total, WAYPOINT_CANDIDATE_SPACING)
+    for entrance_s, exit_s in lane_change_intervals:
+        rounded_s = np.round(regular_s, 6)
+        regular_s = regular_s[
+            (rounded_s <= entrance_s + 1e-6)
+            | (rounded_s >= exit_s - 1e-6)
+        ]
     candidate_types = {
         round(float(value), 6): WAYPOINT_CANDIDATE_REGULAR
-        for value in np.arange(0.0, total, WAYPOINT_CANDIDATE_SPACING)
+        for value in regular_s
     }
     _merge_candidate_type(
         candidate_types, total, WAYPOINT_CANDIDATE_PATH_END)
@@ -54,8 +63,6 @@ def build_base_waypoint_candidates(
         _merge_candidate_type(
             candidate_types, exit_s,
             WAYPOINT_CANDIDATE_JUNCTION_EXIT)
-    lane_change_intervals = _lane_change_intervals(
-        path_xy, lane_change_boundaries)
     for entrance_s, exit_s in lane_change_intervals:
         for value in tuple(candidate_types):
             if entrance_s + 1e-6 < value < exit_s - 1e-6:

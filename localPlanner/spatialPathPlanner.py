@@ -1295,15 +1295,7 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
             new_signature = signature
             if not new_signature or new_signature[-1] != edge.targetLine:
                 new_signature = signature + (edge.targetLine,)
-            new_previous_was_lane_change = (
-                is_lane_change
-                and not (
-                    edge.source == 'S'
-                    and 'P' in graph.nodes[edge.target].roles
-                    and not graph.nodes[edge.target].roles.intersection(
-                        {'G', 'T', 'R'})
-                )
-            )
+            new_previous_was_lane_change = is_lane_change
             new_cost = cost + edge.cost
             new_key = (
                 edge.target,
