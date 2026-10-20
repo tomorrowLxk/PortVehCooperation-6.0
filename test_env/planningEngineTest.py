@@ -50,9 +50,8 @@ from localPlanner.waypointCandidatePlanner import (
     build_future_waypoint_candidates,
 )
 from localPlanner.waypointWholePlanner import (
-    align_old_waypoint_whole,
     plan_block_waypoint_whole,
-    should_replace_waypoint_whole,
+    select_effective_waypoint_whole,
 )
 from localPlanner.waypointSparsePlanner import (
     build_hv_waypoint_sparse,
@@ -882,25 +881,39 @@ class PlanningEngine:
             'futureWaypointCandidates': futureWaypointCandidates,
         }
 
-        # todo. 十一、根据完整优先级进行速度规划。输出本帧全量newWaypointWhole
+        # todo. 十一、按优先级逐车规划，并立即选出供后车约束的实际waypointWhole。
+        def chooseEffectiveWhole(vehicleId, newWaypointWhole):
+            if self.vehicleStaticInfoCaches[vehicleId].get('vehicleType') != 'AGV':
+                return newWaypointWhole, None
+            return select_effective_waypoint_whole(
+                newWaypointWhole,
+                self.vehicleWaypointWholeCaches.get(vehicleId),
+                vehicleId in self.vehicleWaypointSparseCaches,
+                vehicleId in self.vehicleIdsMustDispatch,
+                vehicleId in self.vehicleIdsMustNotDispatch,
+                self.vehicleDynamicInfoCaches[vehicleId]['position'],
+            )
+
         newWaypointWholeResults = {}
+        effectiveWaypointWholeResults = {}
         for priorityDecision in priorityDecisions:
-            blockWaypointWhole = plan_block_waypoint_whole(
+            blockNew, blockEffective = plan_block_waypoint_whole(
                 priority_decision=priorityDecision,
                 future_paths=future_path,
                 waypoint_candidates=futureWaypointCandidates,
                 vehicle_static_info=self.vehicleStaticInfoCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
+                select_effective_whole=chooseEffectiveWhole,
             )
-            newWaypointWholeResults.update(blockWaypointWhole)
+            newWaypointWholeResults.update(blockNew)
+            effectiveWaypointWholeResults.update(blockEffective)
         self.lastPlanningDiagnostics['waypointWhole'] = {
             vehicleId: result.as_dict()
             for vehicleId, result in newWaypointWholeResults.items()
         }
 
-        # todo. 十二、比较新旧waypointWhole，仅为确实变化的AGV更新waypointSparse。
+        # todo. 十二、按已选定的新旧waypointWhole更新或复用waypointSparse。
         waypointSparseResults = {}
-        effectiveWaypointWholeResults = {}
         for vehicleId, newWaypointWhole in newWaypointWholeResults.items():
             if self.vehicleStaticInfoCaches[vehicleId].get('vehicleType') != 'AGV':
                 waypointSparseResults[vehicleId] = build_hv_waypoint_sparse(
@@ -908,44 +921,13 @@ class PlanningEngine:
                     self.vehicleDynamicInfoCaches[vehicleId],
                     self.vehicleBasePathCaches[vehicleId],
                 )
-                effectiveWaypointWholeResults[vehicleId] = newWaypointWhole
                 self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
                 continue
 
-            oldWaypointWhole = self.vehicleWaypointWholeCaches.get(vehicleId)
-            hasHistoricalOutput = (
-                oldWaypointWhole is not None
-                and vehicleId in self.vehicleWaypointSparseCaches
-            )
-            if (vehicleId in self.vehicleIdsMustNotDispatch
-                    and hasHistoricalOutput):
-                alignedOldWaypointWhole = align_old_waypoint_whole(
-                    oldWaypointWhole,
-                    self.vehicleDynamicInfoCaches[vehicleId]['position'],
-                )
+            if effectiveWaypointWholeResults[vehicleId] is not newWaypointWhole:
                 waypointSparseResults[vehicleId] = (
                     self.vehicleWaypointSparseCaches[vehicleId].copy()
                 )
-                effectiveWaypointWholeResults[vehicleId] = alignedOldWaypointWhole
-                continue
-            useNewWaypointWhole = (
-                    vehicleId in self.vehicleIdsMustDispatch
-                    or not hasHistoricalOutput
-            )
-            if not useNewWaypointWhole:
-                alignedOldWaypointWhole = align_old_waypoint_whole(
-                    oldWaypointWhole,
-                    self.vehicleDynamicInfoCaches[vehicleId]['position'],
-                )
-                useNewWaypointWhole = should_replace_waypoint_whole(
-                    alignedOldWaypointWhole,
-                    newWaypointWhole,
-                )
-            if not useNewWaypointWhole:
-                waypointSparseResults[vehicleId] = (
-                    self.vehicleWaypointSparseCaches[vehicleId].copy()
-                )
-                effectiveWaypointWholeResults[vehicleId] = alignedOldWaypointWhole
                 continue
 
             waypointSparse = build_waypoint_sparse(
@@ -960,7 +942,6 @@ class PlanningEngine:
             self.vehicleWaypointWholeCaches[vehicleId] = newWaypointWhole
             self.vehicleWaypointSparseCaches[vehicleId] = waypointSparse.copy()
             self.vehicleIdsNeedWaypointUpdate.add(vehicleId)
-            effectiveWaypointWholeResults[vehicleId] = newWaypointWhole
 
         self.lastPlanningDiagnostics['waypointSparse'] = {
             vehicleId: value.copy()

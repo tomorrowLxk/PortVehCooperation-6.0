@@ -154,14 +154,20 @@ class WaypointWhole:
 
 def plan_block_waypoint_whole(
         priority_decision, future_paths, waypoint_candidates,
-        vehicle_static_info, vehicle_dynamic_info):
-    """按一个协同块的完整优先级由高到低生成waypointWhole。"""
+        vehicle_static_info, vehicle_dynamic_info,
+        select_effective_whole):
+    """逐车生成新结果，立即选出供后车约束的实际结果。"""
+    planned = {}
     accepted = {}
     accepted_geometry = {}
     predecessors = _priority_predecessors(
         priority_decision.members,
         priority_decision.priorityEdges,
     )
+    constraining_vehicles = {
+        high_id for high_ids in predecessors.values()
+        for high_id in high_ids
+    }
 
     for vehicle_id in priority_decision.priorityOrder:
         prepared = _prepare_motion(
@@ -172,42 +178,51 @@ def plan_block_waypoint_whole(
             vehicle_dynamic_info[vehicle_id],
         )
         if vehicle_static_info[vehicle_id].get('vehicleType') != 'AGV':
-            accepted[vehicle_id] = _build_hv_prediction(
+            new_whole = _build_hv_prediction(
                 prepared,
                 vehicle_static_info[vehicle_id],
                 vehicle_dynamic_info[vehicle_id],
             )
-            accepted_geometry[vehicle_id] = _truncate_spatial_geometry(
-                prepared['spatialGeometry'],
-                accepted[vehicle_id].motionS[-1],
+        else:
+            constraints = _build_candidate_constraints(
+                prepared,
+                {
+                    high_id: accepted[high_id]
+                    for high_id in predecessors[vehicle_id]
+                    if high_id in accepted
+                },
+                {
+                    high_id: accepted_geometry[high_id]
+                    for high_id in predecessors[vehicle_id]
+                    if high_id in accepted_geometry
+                },
             )
+            new_whole = _apply_candidate_constraints(
+                prepared,
+                constraints,
+                vehicle_static_info[vehicle_id],
+                vehicle_dynamic_info[vehicle_id],
+            )
+
+        planned[vehicle_id] = new_whole
+        effective_whole, old_path_s = select_effective_whole(vehicle_id, new_whole)
+        accepted[vehicle_id] = effective_whole
+        if vehicle_id not in constraining_vehicles:
             continue
-
-        constraints = _build_candidate_constraints(
-            prepared,
-            {
-                high_id: accepted[high_id]
-                for high_id in predecessors[vehicle_id]
-                if high_id in accepted
-            },
-            {
-                high_id: accepted_geometry[high_id]
-                for high_id in predecessors[vehicle_id]
-                if high_id in accepted_geometry
-            },
-        )
-        accepted[vehicle_id] = _apply_candidate_constraints(
-            prepared,
-            constraints,
-            vehicle_static_info[vehicle_id],
-            vehicle_dynamic_info[vehicle_id],
-        )
+        geometry = prepared['spatialGeometry']
+        if effective_whole is not new_whole:
+            old_path = effective_whole.futurePath
+            geometry = _prepare_spatial_geometry(
+                old_path, old_path_s,
+                effective_whole.futurePathS,
+                vehicle_static_info[vehicle_id],
+                vehicle_dynamic_info[vehicle_id],
+            )
         accepted_geometry[vehicle_id] = _truncate_spatial_geometry(
-            prepared['spatialGeometry'],
-            accepted[vehicle_id].motionS[-1],
+            geometry, effective_whole.motionS[-1],
         )
 
-    return accepted
+    return planned, accepted
 
 
 def _priority_predecessors(members, priority_edges):
@@ -232,7 +247,7 @@ def _priority_predecessors(members, priority_edges):
     return output
 
 
-def align_old_waypoint_whole(old_whole, current_position):
+def align_old_waypoint_whole(old_whole, current_position, with_path_s=False):
     "把历史waypointWhole临时裁剪到当前位置，并将剩余时间重新归零。"
     current_s = (
         project_to_polyline(current_position, old_whole.futurePath)['s']
@@ -246,6 +261,7 @@ def align_old_waypoint_whole(old_whole, current_position):
         current_s,
         float(old_whole.motionS[-1]),
     )
+    path_s = arc_lengths(future_path)
     current_xy = np.asarray(current_position, dtype=float)[:2]
     future_path[0] = current_xy
 
@@ -304,7 +320,7 @@ def align_old_waypoint_whole(old_whole, current_position):
         segment_speeds = np.empty(0, dtype=float)
     candidate_nodes = _nearest_sorted_indices(motion_s, future_path_s)
 
-    return WaypointWhole(
+    aligned = WaypointWhole(
         vehicleId=old_whole.vehicleId,
         points=points,
         futurePathS=future_path_s,
@@ -322,6 +338,7 @@ def align_old_waypoint_whole(old_whole, current_position):
         motionSpeedLimits=motion_speed_limits,
         candidateNodeIndices=candidate_nodes,
     )
+    return (aligned, path_s) if with_path_s else aligned
 
 
 def should_replace_waypoint_whole(aligned_old, new_whole):
@@ -350,6 +367,25 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
         np.any(np.abs(old_times[finite] - new_times[finite])
                > WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE)
     )
+
+
+def select_effective_waypoint_whole(
+        new_whole, old_whole, has_sparse_cache,
+        must_dispatch, must_not_dispatch, current_position):
+    """沿用下发判据，在本车规划后立即确定后车实际看到的结果。"""
+    has_history = old_whole is not None and has_sparse_cache
+    if must_not_dispatch and has_history:
+        return align_old_waypoint_whole(
+            old_whole, current_position, with_path_s=True,
+        )
+    if must_dispatch or not has_history:
+        return new_whole, None
+    aligned_old, old_path_s = align_old_waypoint_whole(
+        old_whole, current_position, with_path_s=True,
+    )
+    if should_replace_waypoint_whole(aligned_old, new_whole):
+        return new_whole, None
+    return aligned_old, old_path_s
 
 
 def _build_hv_prediction(prepared, static, dynamic):
@@ -526,10 +562,11 @@ def _path_states_at_s(path, path_s, values):
         where=lengths > 1e-12,
     )
     centers = path[indices] + ratios[:, None] * segments
+    segment_norms = np.linalg.norm(segments, axis=1)
     tangents = np.divide(
-        segments, lengths[:, None],
+        segments, segment_norms[:, None],
         out=np.tile(np.asarray([[1.0, 0.0]]), (len(targets), 1)),
-        where=lengths[:, None] > 1e-12,
+        where=segment_norms[:, None] > 1e-12,
     )
     return centers, tangents
 
