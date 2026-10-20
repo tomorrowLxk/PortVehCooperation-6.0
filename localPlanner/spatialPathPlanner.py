@@ -100,7 +100,6 @@ class _Edge:
 class _Graph:
     lines: list[np.ndarray]
     lineMetrics: list
-    lineLaneSegments: list[tuple]
     referenceMetric: "_LineMetric"
     nodes: dict[str, _Node]
     edges: dict[int, _Edge]
@@ -815,7 +814,7 @@ def _build_graph(
                 "GLOBAL", geometry, nodes,
             )
     graph = _Graph(
-        lines, line_metrics, line_lane_segments, reference_metric,
+        lines, line_metrics, reference_metric,
         nodes, edges, adjacency, goals, stops,
         primary_line, current_line)
     _prefer_safe_continuation_edge(
@@ -1247,21 +1246,6 @@ def _strict_candidates(
     )
 
 
-def _regular_same_edge(graph, edge):
-    if edge.kind != 'SAME' or edge.sourceLine != edge.targetLine:
-        return False
-    line_index = edge.targetLine
-    start_s = graph.nodes[edge.source].lineS[line_index]
-    end_s = graph.nodes[edge.target].lineS[line_index]
-    if end_s <= start_s + 1e-6:
-        return False
-    return not any(
-        segment.isJunction
-        and max(start_s, segment.startS) < min(end_s, segment.endS) - 1e-6
-        for segment in graph.lineLaneSegments[line_index]
-    )
-
-
 def _search(graph, target_id, collision_pairs, curvature_pairs):
     queue = [(
         0.0, 0.0, 0, "S", None,
@@ -1275,12 +1259,12 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
     pair_sensitive = bool(collision_pairs or curvature_pairs)
     while queue:
         (cost, _, _, node_id, previous_edge, signature, edge_ids,
-         needs_same_edge) = heapq.heappop(queue)
+         previous_was_lane_change) = heapq.heappop(queue)
         state_key = (
             node_id,
             previous_edge if pair_sensitive else None,
             signature,
-            needs_same_edge,
+            previous_was_lane_change,
         )
         if cost > best.get(state_key, float("inf")) + 1e-9:
             continue
@@ -1290,8 +1274,6 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
                 continue
             settled_signatures.add(signature)
         if node_id == target_id:
-            if needs_same_edge:
-                continue
             results.setdefault(signature, (cost, edge_ids))
             if len(results) >= result_limit:
                 break
@@ -1301,15 +1283,20 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
             if edge.state in ("COLLISION_INVALID", "CURVATURE_INVALID"):
                 continue
             pair = (previous_edge, edge_id)
-            if needs_same_edge and not _regular_same_edge(graph, edge):
+            is_lane_change = (
+                edge.kind == 'CROSS'
+                or (edge.kind == 'GLOBAL'
+                    and 'LC' in graph.nodes[edge.target].roles)
+            )
+            if previous_was_lane_change and is_lane_change:
                 continue
             if pair in collision_pairs or pair in curvature_pairs:
                 continue
             new_signature = signature
             if not new_signature or new_signature[-1] != edge.targetLine:
                 new_signature = signature + (edge.targetLine,)
-            new_needs_same_edge = (
-                edge.kind == 'CROSS'
+            new_previous_was_lane_change = (
+                is_lane_change
                 and not (
                     edge.source == 'S'
                     and 'P' in graph.nodes[edge.target].roles
@@ -1322,7 +1309,7 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
                 edge.target,
                 edge_id if pair_sensitive else None,
                 new_signature,
-                new_needs_same_edge,
+                new_previous_was_lane_change,
             )
             if new_cost >= best.get(new_key, float("inf")) - 1e-9:
                 continue
@@ -1331,7 +1318,7 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
                 new_cost, -graph.nodes[edge.target].progress,
                 serial, edge.target, edge_id,
                 new_signature, edge_ids + (edge_id,),
-                new_needs_same_edge,
+                new_previous_was_lane_change,
             ))
             serial += 1
     return [
