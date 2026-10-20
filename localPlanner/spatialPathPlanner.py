@@ -373,11 +373,6 @@ def plan_spatial_path(
                 current, graph.nodes[goal_id].point, reference, polygons,
                 vehicle_static_info, vehicle_dynamic_info,
                 terminal_reason=terminal_reason,
-                lane_change_boundaries=(
-                    ((tuple(current),
-                      tuple(graph.nodes[goal_id].point)),)
-                    if "LC" in graph.nodes[goal_id].roles else ()
-                ),
             )
             return PathPlanResult(
                 True, [fallback],
@@ -1454,7 +1449,7 @@ def _invalid_pair(
 
 def _frenet_fallback(
         current, target, reference, polygons, static_info, dynamic_info,
-        terminal_reason, lane_change_boundaries=()):
+        terminal_reason):
     path = frenet_connector(
         current, target, reference, PATH_OUTPUT_POINT_SPACING)
     stop_s = first_polygon_stop_s(
@@ -1476,5 +1471,4 @@ def _frenet_fallback(
         resample_polyline(path, PATH_OUTPUT_POINT_SPACING),
         0.0, ("FRENET",), maximum, stop, reason,
         True, "FRENET_FALLBACK",
-        laneChangeBoundaries=lane_change_boundaries,
     )
