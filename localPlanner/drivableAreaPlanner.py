@@ -7,6 +7,7 @@ import numpy as np
 
 from parameters import (
     DRIVABLE_LINE_FORWARD_LENGTH,
+    DRIVABLE_LINE_JOIN_TOLERANCE,
     DRIVABLE_LINE_MAX_COUNT,
     DRIVABLE_LINE_POINT_SPACING,
     FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE,
@@ -137,6 +138,7 @@ class DrivableAreaPlanner:
             last_s = self._project_to_line(route[-1], last_line)[0]
             if last_s > 1e-6:
                 break
+            print("#"*100)
             lane_ids.pop()
 
         normalized_connectors = {}
@@ -1102,7 +1104,7 @@ class DrivableAreaPlanner:
             target_point = self._slice_line(
                 self.referLine, target_route_s, target_route_s
             )[0]
-        return target_stage_index, target_point
+        return target_stage_index, target_point, target_route_s
 
     def _target_lane_ends(self, target_stage_index, target_point):
         target_ends = {}
@@ -1201,7 +1203,7 @@ class DrivableAreaPlanner:
                 segment_start_s = accumulated_s
                 if parts:
                     gap = float(np.linalg.norm(parts[-1][-1] - part[0]))
-                    if gap < 1e-6:
+                    if gap <= DRIVABLE_LINE_JOIN_TOLERANCE:
                         part = part[1:]
                 if len(part):
                     if parts:
@@ -1242,18 +1244,18 @@ class DrivableAreaPlanner:
             initial=False,
         )
         if location is None:
-            return []
+            return [], None
 
         current_position = np.asarray(currentPosition, dtype=float)[:2]
         current_stage_index = location['stageIndex']
-        target_stage_index, target_point = self._planning_target(
+        target_stage_index, target_point, target_route_s = self._planning_target(
             current_stage_index, reversePoint
         )
         target_ends = self._target_lane_ends(
             target_stage_index, target_point
         )
         if not target_ends:
-            return []
+            return [], target_route_s
         viable = self._backward_viable_lanes(
             current_stage_index,
             target_stage_index,
@@ -1289,9 +1291,9 @@ class DrivableAreaPlanner:
             item[2],
             item[0],
         ))
-        return [
+        return ([
             line for _, line, _ in candidates[:DRIVABLE_LINE_MAX_COUNT]
-        ]
+        ], target_route_s)
 
     def set_progress_at_point(self, point):
         "车辆到达调箱门倒车点后，将匹配进度切换到下游反向stage。"

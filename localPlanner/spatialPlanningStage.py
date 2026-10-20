@@ -151,7 +151,7 @@ def plan_agv_spatial(
         active_reverse_point = None
 
     try:
-        drivable_lines = drivable_area_planner.plan(
+        drivable_lines, target_route_s = drivable_area_planner.plan(
             position,
             currentHeading=heading,
             currentSpeed=speed,
@@ -166,8 +166,6 @@ def plan_agv_spatial(
             reversePointReached=reached,
         )
 
-    reference_line, stop_at_route_end = _build_agv_reference_line(
-        position, drivable_area_planner, active_reverse_point)
     if not drivable_lines:
         reason = "NO_DRIVABLE_LINE"
         return VehicleSpatialResult(
@@ -176,6 +174,10 @@ def plan_agv_spatial(
             failureReason=reason,
             reversePointReached=reached,
         )
+
+    reference_line, stop_at_route_end = _build_agv_reference_line(
+        position, drivable_area_planner, active_reverse_point,
+        target_route_s)
 
     try:
         path_result = plan_spatial_path(
@@ -282,35 +284,19 @@ def _prefer_continuous_candidates(candidates, previous_base_path, position):
     return continuous + others if continuous else candidates
 
 
-def _build_agv_reference_line(position, planner, reverse_point):
+def _build_agv_reference_line(position, planner, reverse_point,
+                              target_route_s):
     route = clean_xy(planner.referLine)
     route_length = polyline_length(route)
     start_s = float(planner.lastRouteS)
-    phase_end_s = route_length
-    if reverse_point is not None and not planner.passedReversePoint:
-        phase_end_s = min(
-            phase_end_s,
-            float(planner.routeStageBounds[planner.reverseStageIndex][1]),
-        )
-
-    end_s = min(start_s + FUTURE_PATH_LENGTH, phase_end_s)
-    for stage_index, (_, stage_end_s) in enumerate(planner.routeStageBounds):
-        if end_s > float(stage_end_s) + 1e-6:
-            continue
-        if any(
-                lane_id in planner.junctionLaneIds
-                for lane_id in planner.routeStages[stage_index]):
-            end_s = min(float(stage_end_s), phase_end_s)
-        break
-
-    reference = slice_polyline(route, start_s, end_s)
+    reference = slice_polyline(route, start_s, target_route_s)
     if len(reference) == 0:
         reference = position.reshape(1, 2)
     reference = resample_polyline(
         reference, FUTURE_PATH_POINT_SPACING)
     stop_at_route_end = (
             reverse_point is None
-            and end_s >= route_length - 1e-6
+            and target_route_s >= route_length - 1e-6
     )
     return reference, stop_at_route_end
 

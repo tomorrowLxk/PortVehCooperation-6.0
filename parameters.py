@@ -1,4 +1,4 @@
-"""PortVehCooperation 5.0统一参数。"""
+"""PortVehCooperation 6.0统一参数。"""
 
 
 VEHICLE_CACHE_MAX_MISSING_FRAMES = 3  # 车辆连续缺失达到该帧数后，从动静态信息缓存中删除
@@ -28,7 +28,7 @@ FEASIBLE_DOMAIN_LANE_CHANGE_DISTANCE = 0.0  # 完整可行域中每横向换一�
 FEASIBLE_DOMAIN_CONNECTION_OVERLAP_TOLERANCE = 0.5  # 前后车道中心线重叠判定的最大横向距离，单位m
 DRIVABLE_LINE_FORWARD_LENGTH = 80.0  # 每帧局部可行线相对车辆当前长路径进度的前视距离，单位m
 DRIVABLE_LINE_POINT_SPACING = 1.0  # 局部可行线输出点的目标间距，单位m
-JUNCTION_EXIT_PATH_EXTENSION = 5.0  # 前视末端落在交叉口内部时，出弯后沿出口道最多补充的路径长度，单位m
+JUNCTION_EXIT_PATH_EXTENSION = 2.0  # 前视末端落在交叉口内部时，出弯后沿出口道最多补充的路径长度，单位m
 JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE = 2.0  # 出口点与全局终点沿路径距离不超过该值时合并，单位m
 DRIVABLE_LINE_MAX_COUNT = 3  # 每辆车每帧最多输出的局部可行线数量
 VEHICLE_LANE_LOCATE_MAX_DISTANCE = 10.0  # 车辆位置允许匹配到车道中心线的最大横向距离，单位m
@@ -46,6 +46,8 @@ WAYPOINT_SPARSE_MIN_SPACING = 10.0  # 非强制waypointSparse与已有下发点�
 WAYPOINT_MANDATORY_MERGE_DISTANCE = 1.0  # 非交叉口结构强制点沿basePath的合并阈值，单位m
 WAYPOINT_JUNCTION_ENTRANCE_UPSTREAM_OFFSET = 3.0  # 进口必经点相对真实入口向上游移动的最大距离，单位m
 WAYPOINT_MANDATORY_MIN_FORWARD_SPACING = 1.0  # 移动后的进口必经点与前一必经点的最小前向间距，单位m
+SIMULATION_SHORT_PATH_POINT_SPACING = 4.0  # Simulation output densification spacing, m
+DRIVABLE_LINE_JOIN_TOLERANCE = 0.1  # Drivable-line lane-junction merge distance, m
 WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE = 10.0  # 新旧waypointWhole允许复用的最大剩余长度差，单位m
 WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE = 5.0  # 新旧waypointWhole允许复用的最大到达时间差，单位s
 RESPONSE_DESTINATION_TOLERANCE = 2.0  # waypoint末点进入全局终点该距离内时标记最终到达，单位m
