@@ -198,6 +198,7 @@ def plan_block_waypoint_whole(
                     for high_id in predecessors[vehicle_id]
                     if high_id in accepted_geometry
                 },
+                vehicle_dynamic_info[vehicle_id]['speed'],
             )
             new_whole = _apply_candidate_constraints(
                 prepared,
@@ -656,7 +657,8 @@ def _truncate_spatial_geometry(geometry, end_s):
     }
 
 
-def _build_candidate_constraints(prepared, accepted, accepted_geometry):
+def _build_candidate_constraints(
+        prepared, accepted, accepted_geometry, current_speed):
     count = len(prepared['candidates'])
     required = np.full(count, -np.inf, dtype=float)
     speed_caps = np.full(count, np.inf, dtype=float)
@@ -692,12 +694,16 @@ def _build_candidate_constraints(prepared, accepted, accepted_geometry):
                 left_required = required_time
                 right_required = required_time
             else:
+                transfer_speed = max(
+                    COOPERATION_STOP_SPEED_THRESHOLD,
+                    min(float(current_speed), high_speed),
+                )
                 left_required = max(
                     0.0,
-                    required_time - (value - start_s) / high_speed,
+                    required_time - (value - start_s) / transfer_speed,
                 )
                 right_required = (
-                    required_time + (end_s - value) / high_speed)
+                    required_time + (end_s - value) / transfer_speed)
 
             pair_required[left] = _maximum_optional(
                 pair_required[left], left_required)
