@@ -88,8 +88,10 @@ class PlanningEngine:
         self.vehicleBasePathLaneIDCaches: Dict[str, Any] = {}
         # AGV上一轮实际采用的带时间完整waypoint序列。
         self.vehicleWaypointWholeCaches: Dict[str, Any] = {}
-        # AGV上一轮最终向车端发布的稀疏waypoint序列。
+        # Complete planned sparse waypoints, which may exceed the delivered response.
         self.vehicleWaypointSparseCaches: Dict[str, Any] = {}
+        # Updated only after the response is returned.
+        self.vehicleWaypointResponseCaches: Dict[str, Any] = {}
         # 本帧必须重新向车端下发waypoint的车辆ID；每帧开始时清空。
         self.vehicleIdsNeedWaypointUpdate: set[str] = set()
         # 本帧空间重规划已经能够确定必须下发或必须不下发的车辆ID。
@@ -173,6 +175,7 @@ class PlanningEngine:
             self.vehicleBasePathLaneIDCaches.pop(vehicleId, None)
             self.vehicleWaypointWholeCaches.pop(vehicleId, None)
             self.vehicleWaypointSparseCaches.pop(vehicleId, None)
+            self.vehicleWaypointResponseCaches.pop(vehicleId, None)
             self.vehicleRouteProgressCaches.pop(vehicleId, None)
             self.vehicleTaskCaches.pop(vehicleId, None)
             return
@@ -189,6 +192,7 @@ class PlanningEngine:
                 self.vehicleBasePathLaneIDCaches.pop(vehicleId, None)
                 self.vehicleWaypointWholeCaches.pop(vehicleId, None)
                 self.vehicleWaypointSparseCaches.pop(vehicleId, None)
+                self.vehicleWaypointResponseCaches.pop(vehicleId, None)
                 self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
             self.vehicleTaskCaches[vehicleId] = {
@@ -233,6 +237,7 @@ class PlanningEngine:
         self.vehicleBasePathLaneIDCaches.pop(vehicleId, None)
         self.vehicleWaypointWholeCaches.pop(vehicleId, None)
         self.vehicleWaypointSparseCaches.pop(vehicleId, None)
+        self.vehicleWaypointResponseCaches.pop(vehicleId, None)
         self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
         # 调箱门修复属于局部规划上下文构建：新任务必修复，同任务仅在R点尚存时修复。
@@ -325,6 +330,7 @@ class PlanningEngine:
             self.vehicleBasePathLaneIDCaches,
             self.vehicleWaypointWholeCaches,
             self.vehicleWaypointSparseCaches,
+            self.vehicleWaypointResponseCaches,
             self.vehicleObstacleCaches,
             self.reversePointCaches,
             self.vehicleTaskCaches,
@@ -408,6 +414,23 @@ class PlanningEngine:
                 )
 
         return noHistory, historyFinished, vehicleDeviated, historyBlocked
+
+    def shouldRefreshAgvWaypointResponse(self, vehicleId, dynamicInfo):
+        """Refresh near the delivered endpoint without replanning basePath."""
+        waypointResponse = self.vehicleWaypointResponseCaches.get(vehicleId)
+        if waypointResponse is None or len(waypointResponse) == 0:
+            return True
+        basePath = clean_xy(self.vehicleBasePathCaches[vehicleId])
+        if len(basePath) < 2:
+            return True
+        currentMatch = project_to_polyline(dynamicInfo['position'], basePath)
+        responseMatch = project_to_polyline(
+            waypointResponse[-1, :2], basePath)
+        return (
+            responseMatch['distance'] > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+            or responseMatch['s'] - currentMatch['s']
+            <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
+        )
 
     def updateVehicleObstacleCaches(
             self, requests, effectiveWaypointWholeResults,
@@ -621,6 +644,8 @@ class PlanningEngine:
             (noHistory, historyFinished,
              vehicleDeviated, historyBlocked) = replanFlags
             if not any(replanFlags):
+                if self.shouldRefreshAgvWaypointResponse(vehicleId, dynamicInfo):
+                    self.vehicleIdsMustDispatch.add(vehicleId)
                 AGV_basePathCandidates[vehicleId] = [self.vehicleBasePathCaches[vehicleId].copy()]
                 agvExecutableShortPathVehicleIds.add(vehicleId)
                 continue
@@ -666,8 +691,19 @@ class PlanningEngine:
                         selectedBasePath[-1, :2]
                         - oldBasePath[-1, :2]
                     )
+                    previousResponse = self.vehicleWaypointResponseCaches.get(
+                        vehicleId)
+                    responseCoversEnd = (
+                        previousResponse is not None
+                        and len(previousResponse) > 0
+                        and np.linalg.norm(
+                            previousResponse[-1, :2]
+                            - selectedBasePath[-1, :2]
+                        ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+                    )
                     if (endpointDistance
-                            > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD):
+                            > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+                            or not responseCoversEnd):
                         self.vehicleIdsMustNotDispatch.discard(vehicleId)
                         self.vehicleIdsMustDispatch.add(vehicleId)
                     else:
@@ -981,8 +1017,9 @@ class PlanningEngine:
                 responseJunctionLaneIds = planner.junctionLaneIds
 
             responsePath = self.vehicleBasePathCaches[vehicleId]
+            waypointResponse = waypointSparseResults[vehicleId].copy()
             shortPathList, mergePathList = build_response_path_lists(
-                waypoints=waypointSparseResults[vehicleId],
+                waypoints=waypointResponse,
                 planned_path=responsePath,
                 centerline_dict=responseCenterlines,
                 connector_dict=responseConnectors,
@@ -999,6 +1036,7 @@ class PlanningEngine:
                 f"{vehicleId}_{request.get('commandId')}_{time.time_ns()}"
             )
             finalResponses.append(response)
+            self.vehicleWaypointResponseCaches[vehicleId] = waypointResponse
             if any(
                     path.get('isFinalDestination', False)
                     for path in shortPathList):
