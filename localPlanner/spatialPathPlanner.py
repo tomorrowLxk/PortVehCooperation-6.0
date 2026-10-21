@@ -28,6 +28,7 @@ from parameters import (
     PATH_COLLISION_SAMPLE_SPACING,
     PATH_CURVE_SAMPLE_SPACING,
     PATH_G0_LATERAL_TOLERANCE,
+    PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE,
     PATH_GRAPH_START_OFFSET,
     PATH_LANE_CHANGE_LONGITUDINAL_RATIO,
     PATH_LANE_CHANGE_PENALTY,
@@ -640,15 +641,18 @@ def _build_graph(
                 for segment in segments
             )
         ]
-        destination_needs_lane_change = (
-            destination_lane_id is not None and not destination_lines
-        )
         primary_line = min(
             destination_lines or range(len(line_metrics)),
             key=lambda index: (
                 line_metrics[index].project(reference[-1])['distance'],
                 index,
             ),
+        )
+        destination_needs_lane_change = (
+            destination_lane_id is not None
+            and not destination_lines
+            and line_metrics[primary_line].project(reference[-1])['distance']
+            > PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE
         )
         destination_heading = float(reference_metric.headings[-1])
         destination_id = "D"
@@ -1278,11 +1282,7 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
             if edge.state in ("COLLISION_INVALID", "CURVATURE_INVALID"):
                 continue
             pair = (previous_edge, edge_id)
-            is_lane_change = (
-                edge.kind == 'CROSS'
-                or (edge.kind == 'GLOBAL'
-                    and 'LC' in graph.nodes[edge.target].roles)
-            )
+            is_lane_change = _is_lane_change_edge(graph, edge)
             if previous_was_lane_change and is_lane_change:
                 continue
             if pair in collision_pairs or pair in curvature_pairs:
@@ -1324,28 +1324,31 @@ def _edge_node_path(graph, edge_ids):
     ], dtype=float)
 
 
+def _is_lane_change_edge(graph, edge):
+    if edge.kind == "GLOBAL":
+        return "LC" in graph.nodes[edge.target].roles
+    if edge.kind != "CROSS":
+        return False
+    source_lines = graph.nodes[edge.source].lineS
+    target_point = graph.nodes[edge.target].point
+    return bool(source_lines) and min(
+        graph.lineMetrics[line_index].project(target_point)["distance"]
+        for line_index in source_lines
+    ) > PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE
+
+
 def _edge_lane_change_boundaries(graph, edge_ids):
     boundaries = []
     for edge_id in edge_ids:
         edge = graph.edges[edge_id]
-        if edge.kind == "CROSS":
+        if edge.kind == "CROSS" and _is_lane_change_edge(graph, edge):
             boundaries.append((
                 tuple(graph.nodes[edge.source].point[:2]),
                 tuple(graph.nodes[edge.target].point[:2]),
             ))
-        elif (edge.kind == "GLOBAL"
-              and "LC" in graph.nodes[edge.target].roles):
+        elif edge.kind == "GLOBAL" and _is_lane_change_edge(graph, edge):
             boundaries.append((
                 tuple(graph.nodes["S"].point[:2]),
-                tuple(graph.nodes[edge.target].point[:2]),
-            ))
-        elif (edge.source == 'S'
-              and edge.kind in ('SAME', 'CONTINUATION')
-              and graph.lineMetrics[edge.targetLine].project(
-                  graph.nodes['S'].point)['distance']
-              > PATH_G0_LATERAL_TOLERANCE):
-            boundaries.append((
-                tuple(graph.nodes['S'].point[:2]),
                 tuple(graph.nodes[edge.target].point[:2]),
             ))
     return tuple(boundaries)
