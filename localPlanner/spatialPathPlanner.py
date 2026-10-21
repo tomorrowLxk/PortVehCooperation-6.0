@@ -29,6 +29,7 @@ from parameters import (
     PATH_CURVE_SAMPLE_SPACING,
     PATH_G0_LATERAL_TOLERANCE,
     PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE,
+    PATH_START_SAME_LANE_CHANGE_LATERAL_DISTANCE,
     PATH_GRAPH_START_OFFSET,
     PATH_LANE_CHANGE_LONGITUDINAL_RATIO,
     PATH_LANE_CHANGE_PENALTY,
@@ -1347,6 +1348,15 @@ def _edge_lane_change_boundaries(graph, edge_ids):
                 tuple(graph.nodes[edge.target].point[:2]),
             ))
         elif edge.kind == "GLOBAL" and _is_lane_change_edge(graph, edge):
+            boundaries.append((
+                tuple(graph.nodes["S"].point[:2]),
+                tuple(graph.nodes[edge.target].point[:2]),
+            ))
+        elif (edge.source == "S"
+              and edge.kind in ("SAME", "CONTINUATION")
+              and graph.lineMetrics[edge.targetLine].project(
+                  graph.nodes["S"].point)["distance"]
+              > PATH_START_SAME_LANE_CHANGE_LATERAL_DISTANCE):
             boundaries.append((
                 tuple(graph.nodes["S"].point[:2]),
                 tuple(graph.nodes[edge.target].point[:2]),
