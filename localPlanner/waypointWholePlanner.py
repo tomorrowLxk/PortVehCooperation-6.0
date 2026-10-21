@@ -23,7 +23,7 @@ from parameters import (
     WAYPOINT_CANDIDATE_SPACING,
     WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
     WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION,
-    WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE,
+    WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE,
 )
 
 
@@ -353,6 +353,8 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
     new_length = float(new_whole.motionS[-1])
     if abs(old_length - new_length) > WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE:
         return True
+    if aligned_old.stopped:
+        return False
 
     common_length = min(old_length, new_length)
     sample_s = _unique_sorted_values(np.r_[
@@ -361,15 +363,19 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
         new_whole.motionS[new_whole.motionS <= common_length + 1e-9],
         common_length,
     ])
-    old_times, _ = _whole_states_at_s(aligned_old, sample_s)
-    new_times, _ = _whole_states_at_s(new_whole, sample_s)
-    if np.any(np.isfinite(old_times) != np.isfinite(new_times)):
+    if len(sample_s) < 2:
+        old_speeds = np.asarray([aligned_old.terminalSpeed])
+        new_speeds = np.asarray([new_whole.terminalSpeed])
+    else:
+        sample_midpoints = 0.5 * (sample_s[:-1] + sample_s[1:])
+        _, old_speeds = _whole_states_at_s(aligned_old, sample_midpoints)
+        _, new_speeds = _whole_states_at_s(new_whole, sample_midpoints)
+    if not np.all(np.isfinite(old_speeds) & np.isfinite(new_speeds)):
         return True
-    finite = np.isfinite(old_times) & np.isfinite(new_times)
-    return bool(
-        np.any(np.abs(old_times[finite] - new_times[finite])
-               > WAYPOINT_WHOLE_REUSE_MAX_TIME_DIFFERENCE)
-    )
+    return bool(np.any(
+        np.abs(old_speeds - new_speeds)
+        > WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE
+    ))
 
 
 def _path_within_distance(source, target, max_distance):
