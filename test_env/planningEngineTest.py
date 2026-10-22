@@ -92,6 +92,8 @@ class PlanningEngine:
         self.vehicleWaypointSparseCaches: Dict[str, Any] = {}
         # Updated only after the response is returned.
         self.vehicleWaypointResponseCaches: Dict[str, Any] = {}
+        # Segments of the last response actually sent to the vehicle.
+        self.vehicleDispatchedPathVOCaches: Dict[str, Any] = {}
         # 本帧必须重新向车端下发waypoint的车辆ID；每帧开始时清空。
         self.vehicleIdsNeedWaypointUpdate: set[str] = set()
         # 本帧空间重规划已经能够确定必须下发或必须不下发的车辆ID。
@@ -176,6 +178,7 @@ class PlanningEngine:
             self.vehicleWaypointWholeCaches.pop(vehicleId, None)
             self.vehicleWaypointSparseCaches.pop(vehicleId, None)
             self.vehicleWaypointResponseCaches.pop(vehicleId, None)
+            self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
             self.vehicleRouteProgressCaches.pop(vehicleId, None)
             self.vehicleTaskCaches.pop(vehicleId, None)
             return
@@ -193,6 +196,7 @@ class PlanningEngine:
                 self.vehicleWaypointWholeCaches.pop(vehicleId, None)
                 self.vehicleWaypointSparseCaches.pop(vehicleId, None)
                 self.vehicleWaypointResponseCaches.pop(vehicleId, None)
+                self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
                 self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
             self.vehicleTaskCaches[vehicleId] = {
@@ -238,6 +242,7 @@ class PlanningEngine:
         self.vehicleWaypointWholeCaches.pop(vehicleId, None)
         self.vehicleWaypointSparseCaches.pop(vehicleId, None)
         self.vehicleWaypointResponseCaches.pop(vehicleId, None)
+        self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
         self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
         # 调箱门修复属于局部规划上下文构建：新任务必修复，同任务仅在R点尚存时修复。
@@ -331,6 +336,7 @@ class PlanningEngine:
             self.vehicleWaypointWholeCaches,
             self.vehicleWaypointSparseCaches,
             self.vehicleWaypointResponseCaches,
+            self.vehicleDispatchedPathVOCaches,
             self.vehicleObstacleCaches,
             self.reversePointCaches,
             self.vehicleTaskCaches,
@@ -526,6 +532,28 @@ class PlanningEngine:
                     and float(waypointWhole.motionS[-1])
                     > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
                 )
+                if shouldMove:
+                    nearestDistance = float('inf')
+                    nearestSpeed = 0.0
+                    for startX, startY, endX, endY, segmentSpeed in (
+                            self.vehicleDispatchedPathVOCaches.get(
+                                vehicleId, ())):
+                        deltaX = endX - startX
+                        deltaY = endY - startY
+                        lengthSquared = deltaX * deltaX + deltaY * deltaY
+                        projection = (
+                            ((position[0] - startX) * deltaX
+                             + (position[1] - startY) * deltaY)
+                            / lengthSquared if lengthSquared > 1e-12 else 0.0
+                        )
+                        projection = min(1.0, max(0.0, projection))
+                        offsetX = position[0] - startX - projection * deltaX
+                        offsetY = position[1] - startY - projection * deltaY
+                        distance = offsetX * offsetX + offsetY * offsetY
+                        if distance <= nearestDistance:
+                            nearestDistance = distance
+                            nearestSpeed = segmentSpeed
+                    shouldMove = nearestSpeed > 1e-9
                 if shouldMove:
                     reason = '其他'
 
@@ -1037,6 +1065,16 @@ class PlanningEngine:
             )
             finalResponses.append(response)
             self.vehicleWaypointResponseCaches[vehicleId] = waypointResponse
+            self.vehicleDispatchedPathVOCaches[vehicleId] = tuple(
+                (
+                    float(path['points'][0]['x']),
+                    float(path['points'][0]['y']),
+                    float(path['points'][-1]['x']),
+                    float(path['points'][-1]['y']),
+                    float(path.get('speedLimit') or 0.0),
+                )
+                for path in shortPathList if path.get('points')
+            )
             if any(
                     path.get('isFinalDestination', False)
                     for path in shortPathList):
