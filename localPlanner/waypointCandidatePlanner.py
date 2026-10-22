@@ -55,7 +55,7 @@ def build_base_waypoint_candidates(
         candidate_types, total, WAYPOINT_CANDIDATE_PATH_END)
     junction_intervals = _junction_intervals(
         path_xy, centerline_dict, junction_lane_ids,
-        base_path_lane_ids)
+        base_path_lane_ids, final_destination)
     for entrance_s, exit_s in junction_intervals:
         _merge_candidate_type(
             candidate_types, entrance_s,
@@ -184,8 +184,16 @@ def _s_inside_candidate_junction(value, candidates):
 
 def _junction_intervals(
         path, centerline_dict, junction_lane_ids,
-        base_path_lane_ids=None):
+        base_path_lane_ids=None, final_destination=None):
     intervals = []
+    terminal_lane_id = None
+    if (final_destination is not None
+            and base_path_lane_ids is not None
+            and len(base_path_lane_ids) == len(path)
+            and np.linalg.norm(
+                path[-1] - np.asarray(final_destination, dtype=float)[:2]
+            ) <= 1e-3):
+        terminal_lane_id = str(base_path_lane_ids[-1])
     path_min = np.min(path, axis=0) - VEHICLE_LANE_LOCATE_MAX_DISTANCE
     path_max = np.max(path, axis=0) + VEHICLE_LANE_LOCATE_MAX_DISTANCE
     for lane_id in _relevant_junction_lane_ids(
@@ -205,6 +213,15 @@ def _junction_intervals(
                 and exit_point['s'] > entrance['s'] + 1e-6):
             intervals.append((
                 float(entrance['s']), float(exit_point['s'])))
+        elif (lane_id == terminal_lane_id
+              and entrance['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE):
+            destination = project_to_polyline(path[-1], lane)
+            lane_length = polyline_length(lane)
+            path_length = polyline_length(path)
+            if (destination['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
+                    and 1e-6 < destination['s'] < lane_length - 1e-6
+                    and path_length > entrance['s'] + 1e-6):
+                intervals.append((float(entrance['s']), path_length))
     return sorted(set(
         (round(entrance_s, 6), round(exit_s, 6))
         for entrance_s, exit_s in intervals
