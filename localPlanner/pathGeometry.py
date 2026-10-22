@@ -206,6 +206,7 @@ def path_curvatures(line, window):
     headings = np.unwrap(np.arctan2(
         np.diff(points[:, 1]), np.diff(points[:, 0])
     ))
+    heading_s = (arc[:-1] + arc[1:]) / 2.0
     lower = np.maximum(0.0, arc - half)
     upper = np.minimum(total, arc + half)
     if total > 2.0 * half:
@@ -213,18 +214,11 @@ def path_curvatures(line, window):
         near_end = arc > total - half
         upper[near_start] = 2.0 * half
         lower[near_end] = total - 2.0 * half
-    lower_index = np.clip(
-        np.searchsorted(arc, lower, side="right") - 1,
-        0, len(headings) - 1,
-    )
-    upper_index = np.clip(
-        np.searchsorted(arc, upper, side="right") - 1,
-        0, len(headings) - 1,
-    )
-    delta = np.arctan2(
-        np.sin(headings[upper_index] - headings[lower_index]),
-        np.cos(headings[upper_index] - headings[lower_index]),
-    )
+    # Interpolate segment headings at the exact arc-length window boundaries.
+    # This makes their difference consistent with the distance denominator.
+    lower_heading = np.interp(lower, heading_s, headings)
+    upper_heading = np.interp(upper, heading_s, headings)
+    delta = upper_heading - lower_heading
     return np.abs(delta) / np.maximum(upper - lower, 1e-9)
 
 

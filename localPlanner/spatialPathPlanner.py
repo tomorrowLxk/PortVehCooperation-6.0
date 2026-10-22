@@ -50,6 +50,9 @@ from parameters import (
 )
 
 
+PATH_ON_LINE_POSITION_TOLERANCE = 1e-2
+
+
 @dataclass
 class PathCandidate:
     xy: np.ndarray
@@ -712,7 +715,8 @@ def _build_graph(
             math.cos(current_heading - line_metrics[current_line].values_at(
                 [current_start_s])[1][0]),
         ))
-        if (np.linalg.norm(projected_start - current) <= 1e-6
+        if (np.linalg.norm(projected_start - current)
+                <= PATH_ON_LINE_POSITION_TOLERANCE
                 and heading_error <= math.radians(
                     PATH_ON_LINE_HEADING_TOLERANCE_DEG)):
             geometry = line_metrics[current_line].slice(
@@ -1034,7 +1038,8 @@ def _same_line_baseline_paths(graph, terminal, dynamic_info):
         math.sin(current_heading - line_headings[0]),
         math.cos(current_heading - line_headings[0]),
     ))
-    if (np.linalg.norm(projected_start[0] - current) <= 1e-6
+    if (np.linalg.norm(projected_start[0] - current)
+            <= PATH_ON_LINE_POSITION_TOLERANCE
             and heading_error <= math.radians(
                 PATH_ON_LINE_HEADING_TOLERANCE_DEG)):
         path = metric.slice(start_s, end_s)
