@@ -1093,6 +1093,11 @@ def _strict_candidates(
         if end_s > start_s + 1e-9:
             safe_baselines = []
             valid_baselines = []
+            start_off_line = (
+                graph.lineMetrics[current_line].project(
+                    graph.nodes["S"].point)["distance"]
+                > PATH_START_SAME_LANE_CHANGE_LATERAL_DISTANCE
+            )
             for path, node_path in _same_line_baseline_paths(
                     graph, terminal, dynamic_info):
                 collision = path_vehicle_intersects(
@@ -1127,11 +1132,18 @@ def _strict_candidates(
                 scored_curvature = float(np.max(path_curvatures(
                     sampled, PATH_CURVATURE_WINDOW
                 ))) if len(sampled) > 2 else 0.0
+                lane_change_boundaries = ()
+                if start_off_line and len(node_path) >= 2:
+                    lane_change_boundaries = ((
+                        tuple(node_path[0, :2]),
+                        tuple(node_path[1, :2]),
+                    ),)
                 valid_baselines.append((
                     score,
                     PathCandidate(
                         sampled, 0.0, (current_line,),
                         scored_curvature,
+                        laneChangeBoundaries=lane_change_boundaries,
                     ),
                 ))
 
