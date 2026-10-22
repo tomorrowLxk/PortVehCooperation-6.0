@@ -15,6 +15,7 @@ from parameters import (
     AGV_BASE_PATH_DEVIATION_THRESHOLD,
     AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD,
     AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE,
+    AGV_WAYPOINT_RESPONSE_REFRESH_DISTANCE,
     PATH_COLLISION_SAMPLE_SPACING,
     PATH_LATERAL_SAFETY_MARGIN,
 )
@@ -435,7 +436,7 @@ class PlanningEngine:
         return (
             responseMatch['distance'] > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
             or responseMatch['s'] - currentMatch['s']
-            <= AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE
+            <= AGV_WAYPOINT_RESPONSE_REFRESH_DISTANCE
         )
 
     def updateVehicleObstacleCaches(
