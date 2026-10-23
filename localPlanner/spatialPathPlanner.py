@@ -99,6 +99,7 @@ class _Edge:
     state: str = "UNKNOWN"
     maxCurvature: float = 0.0
     cost: float = 0.0
+    isLaneChange: bool | None = None
 
 
 @dataclass
@@ -1347,12 +1348,15 @@ def _is_lane_change_edge(graph, edge):
         return "LC" in graph.nodes[edge.target].roles
     if edge.kind != "CROSS":
         return False
+    if edge.isLaneChange is not None:
+        return edge.isLaneChange
     source_lines = graph.nodes[edge.source].lineS
     target_point = graph.nodes[edge.target].point
-    return bool(source_lines) and min(
+    edge.isLaneChange = bool(source_lines) and min(
         graph.lineMetrics[line_index].project(target_point)["distance"]
         for line_index in source_lines
     ) > PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE
+    return edge.isLaneChange
 
 
 def _edge_lane_change_boundaries(graph, edge_ids):
