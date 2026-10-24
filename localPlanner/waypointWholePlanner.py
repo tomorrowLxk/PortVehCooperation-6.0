@@ -567,7 +567,7 @@ def _prepare_spatial_geometry(path, path_s, candidate_s, static, dynamic):
         'halfWidth': (
             0.5 * float(static['width'])
             + float(dynamic.get('lateralUncertainty', 0.0))
-            + 0.5 * COOPERATION_LATERAL_MARGIN
+            + COOPERATION_LATERAL_MARGIN
         ),
     }
 
