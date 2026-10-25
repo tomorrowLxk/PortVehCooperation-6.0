@@ -1017,7 +1017,39 @@ class DrivableAreaPlanner:
                     return distance + 1
                 visited.add(neighbour)
                 queue.append((neighbour, distance + 1))
+        if (first_lane in self.junctionLaneIds
+                and second_lane in self.junctionLaneIds
+                and self._parallel_junction_lanes(
+                    first_lane, second_lane, stage_index)):
+            return 1
         return None
+
+    def _parallel_junction_lanes(self, first_lane, second_lane, stage_index):
+        """Infer first-stage junction adjacency from feasible neighbouring stages."""
+        for adjacent_stage, connection_key in (
+                (stage_index - 1, 'predecessor'),
+                (stage_index + 1, 'successor')):
+            if not 0 <= adjacent_stage < len(self.routeStages):
+                continue
+            stage_lanes = self.routeStages[adjacent_stage]
+            first_connected = [
+                lane for lane in self.connector_dict[first_lane][connection_key]
+                if lane in stage_lanes
+            ]
+            second_connected = {
+                lane for lane in self.connector_dict[second_lane][connection_key]
+                if lane in stage_lanes
+            }
+            for lane in first_connected:
+                info = self.connector_dict[lane]
+                for neighbour, reverse_key in (
+                        (info['left_lane'], 'right_lane'),
+                        (info['right_lane'], 'left_lane')):
+                    if (neighbour in second_connected
+                            and self.connector_dict[neighbour][reverse_key]
+                            == lane):
+                        return True
+        return False
 
     def _line_similarity(self, line):
         return self.referenceMetric.mean_distance(line)
