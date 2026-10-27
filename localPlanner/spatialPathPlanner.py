@@ -107,6 +107,7 @@ class _Graph:
     lines: list[np.ndarray]
     lineMetrics: list
     referenceMetric: "_LineMetric"
+    crossMetric: "_LineMetric"
     nodes: dict[str, _Node]
     edges: dict[int, _Edge]
     adjacency: dict[str, list[int]]
@@ -473,6 +474,7 @@ def _build_graph(
         stop_at_route_end, destination_lane_id):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
+    cross_metric = max(line_metrics, key=lambda metric: metric.total)
     current_projections = [metric.project(current) for metric in line_metrics]
     current_line = min(
         range(len(lines)),
@@ -819,7 +821,7 @@ def _build_graph(
                 "GLOBAL", geometry, nodes,
             )
     graph = _Graph(
-        lines, line_metrics, reference_metric,
+        lines, line_metrics, reference_metric, cross_metric,
         nodes, edges, adjacency, goals, stops,
         primary_line, current_line)
     _prefer_safe_continuation_edge(
@@ -1393,7 +1395,18 @@ def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
     if edge.kind == "SAME" and not polygons:
         edge.state = "VALID"
         return
-    _materialize_edge(graph, edge, dynamic_info)
+    cross_s = None
+    if edge.kind == "CROSS":
+        projections = graph.crossMetric.project_many(np.vstack((
+            graph.nodes[edge.source].point,
+            graph.nodes[edge.target].point,
+        )))
+        start_s, end_s = map(float, projections["s"])
+        if end_s <= start_s + 1e-6:
+            edge.state = "CURVATURE_INVALID"
+            return
+        cross_s = (start_s, end_s)
+    _materialize_edge(graph, edge, dynamic_info, cross_s)
     if path_vehicle_intersects(
             edge.geometry, polygons,
             static_info["length"], static_info["width"],
@@ -1420,7 +1433,7 @@ def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
     )
 
 
-def _materialize_edge(graph, edge, dynamic_info=None):
+def _materialize_edge(graph, edge, dynamic_info=None, cross_s=None):
     if edge.geometry is not None:
         return edge.geometry
     source, target = graph.nodes[edge.source], graph.nodes[edge.target]
@@ -1435,11 +1448,22 @@ def _materialize_edge(graph, edge, dynamic_info=None):
             if edge.source == "S"
             else source.headings[edge.sourceLine]
         )
-        edge.geometry = graph.referenceMetric.frenet_hermite_connector(
+        if edge.kind == "CROSS":
+            metric = graph.crossMetric
+            if cross_s is None:
+                projections = metric.project_many(np.vstack((
+                    source.point, target.point,
+                )))
+                cross_s = tuple(map(float, projections["s"]))
+            start_s, end_s = cross_s
+        else:
+            metric = graph.referenceMetric
+            start_s, end_s = source.referenceS, target.referenceS
+        edge.geometry = metric.frenet_hermite_connector(
             source.point, source_heading,
-            source.referenceS,
+            start_s,
             target.point, target.headings[edge.targetLine],
-            target.referenceS,
+            end_s,
             PATH_CURVE_SAMPLE_SPACING,
         )
     return edge.geometry
