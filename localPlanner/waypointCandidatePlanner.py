@@ -38,8 +38,16 @@ def build_base_waypoint_candidates(
         ]], dtype=float)
 
     total = polyline_length(path_xy)
-    lane_change_intervals = _lane_change_intervals(
-        path_xy, lane_change_boundaries)
+    junction_intervals = _junction_intervals(
+        path_xy, centerline_dict, junction_lane_ids,
+        base_path_lane_ids, final_destination)
+    lane_change_intervals = [
+        (entrance_s, exit_s)
+        for entrance_s, exit_s in _lane_change_intervals(
+            path_xy, lane_change_boundaries)
+        if not (_s_inside_junction_interval(entrance_s, junction_intervals)
+                or _s_inside_junction_interval(exit_s, junction_intervals))
+    ]
     regular_s = np.arange(0.0, total, WAYPOINT_CANDIDATE_SPACING)
     for entrance_s, exit_s in lane_change_intervals:
         rounded_s = np.round(regular_s, 6)
@@ -53,9 +61,6 @@ def build_base_waypoint_candidates(
     }
     _merge_candidate_type(
         candidate_types, total, WAYPOINT_CANDIDATE_PATH_END)
-    junction_intervals = _junction_intervals(
-        path_xy, centerline_dict, junction_lane_ids,
-        base_path_lane_ids, final_destination)
     for entrance_s, exit_s in junction_intervals:
         _merge_candidate_type(
             candidate_types, entrance_s,
@@ -187,6 +192,9 @@ def _junction_intervals(
         base_path_lane_ids=None, final_destination=None):
     intervals = []
     terminal_lane_id = None
+    start_lane_id = None
+    if base_path_lane_ids is not None and len(base_path_lane_ids) == len(path):
+        start_lane_id = str(base_path_lane_ids[0])
     if (final_destination is not None
             and base_path_lane_ids is not None
             and len(base_path_lane_ids) == len(path)
@@ -208,6 +216,17 @@ def _junction_intervals(
             continue
         entrance = project_to_polyline(lane[0], path)
         exit_point = project_to_polyline(lane[-1], path)
+        if lane_id == start_lane_id:
+            start_on_lane = project_to_polyline(path[0], lane)
+            lane_length = polyline_length(lane)
+            end_on_lane = project_to_polyline(path[-1], lane)
+            if (start_on_lane['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
+                    and 1e-6 < start_on_lane['s'] < lane_length - 1e-6
+                    and end_on_lane['s'] >= lane_length - 1e-6
+                    and exit_point['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
+                    and exit_point['s'] > 1e-6):
+                intervals.append((0.0, float(exit_point['s'])))
+                continue
         if (entrance['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
                 and exit_point['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
                 and exit_point['s'] > entrance['s'] + 1e-6):
@@ -226,6 +245,14 @@ def _junction_intervals(
         (round(entrance_s, 6), round(exit_s, 6))
         for entrance_s, exit_s in intervals
     ))
+
+
+def _s_inside_junction_interval(value, intervals):
+    return any(
+        (entrance_s + 1e-6 < value < exit_s - 1e-6)
+        or (entrance_s <= 1e-6 and value <= 1e-6)
+        for entrance_s, exit_s in intervals
+    )
 
 
 def _lane_change_intervals(path, lane_change_boundaries):
