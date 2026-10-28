@@ -572,8 +572,8 @@ class PlanningEngine:
             else:
                 frames = (
                     int(old.get('frames', 0)) + 1
-                    if sameReason and int(old.get('frames', 0)) >= 3
-                    else 3
+                    if sameReason and int(old.get('frames', 0)) >= VEHICLE_OBSTACLE_CONFIRM_FRAMES
+                    else VEHICLE_OBSTACLE_CONFIRM_FRAMES
                 )
             frames = min(frames, VEHICLE_OBSTACLE_MAX_FRAMES)
             updated[vehicleId] = {

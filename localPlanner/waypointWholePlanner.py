@@ -669,34 +669,78 @@ def _build_candidate_constraints(
     required = np.full(count, -np.inf, dtype=float)
     speed_caps = np.full(count, np.inf, dtype=float)
     all_segments = []
-    aeb_checks = []
+    aeb_sources = []
+    aeb_positions = []
 
     low_geometry = prepared['spatialGeometry']
+    # The ordinary look-ahead stops at the end of B's planned motion.
+    # Only its final 6 m needs a front-only box for A just beyond that end.
+    terminal_mask = (
+        low_geometry['sampleS']
+        >= low_geometry['sampleS'][-1] - COOPERATION_STATIC_GAP - 1e-9
+    )
+    terminal_geometry = {
+        'sampleS': low_geometry['sampleS'][terminal_mask],
+        'centers': (
+            low_geometry['centers'][terminal_mask]
+            + 0.5 * COOPERATION_STATIC_GAP
+            * low_geometry['tangents'][terminal_mask]
+        ),
+        'tangents': low_geometry['tangents'][terminal_mask],
+        'normals': low_geometry['normals'][terminal_mask],
+        'halfLength': (
+            low_geometry['halfLength'] + 0.5 * COOPERATION_STATIC_GAP
+        ),
+        'halfWidth': low_geometry['halfWidth'],
+    }
     for high_id, high_whole in accepted.items():
         high_geometry = accepted_geometry[high_id]
+        aeb_sources.append((high_whole, high_geometry))
         pair_required = np.full(count, np.nan, dtype=float)
         pair_speed_caps = np.full(count, np.nan, dtype=float)
         conflict_s, blocked_mask = _last_conflicting_positions(
-            low_geometry,
-            high_geometry,
-            high_whole.stopped,
-            COOPERATION_STATIC_GAP,
+            low_geometry, high_geometry, high_whole.stopped,
         )
         conflict_indices = np.flatnonzero(np.isfinite(conflict_s))
+        constraint_s = np.maximum(
+            0.0,
+            low_geometry['sampleS'][conflict_indices] - COOPERATION_STATIC_GAP,
+        )
+        high_conflict_s = conflict_s[conflict_indices]
+        blocked = blocked_mask[conflict_indices]
+
+        terminal_conflict_s, terminal_blocked = _last_conflicting_positions(
+            terminal_geometry, high_geometry, high_whole.stopped)
+        terminal_indices = np.flatnonzero(np.isfinite(terminal_conflict_s))
+        constraint_s = np.r_[
+            constraint_s,
+            terminal_geometry['sampleS'][terminal_indices],
+        ]
+        high_conflict_s = np.r_[
+            high_conflict_s,
+            terminal_conflict_s[terminal_indices],
+        ]
+        blocked = np.r_[blocked, terminal_blocked[terminal_indices]]
+        aeb_positions.extend(constraint_s)
+
         conflict_times, conflict_speeds = _whole_states_at_s(
-            high_whole, conflict_s[conflict_indices])
+            high_whole, high_conflict_s)
         conflict_times += COOPERATION_TIME_CLEARANCE
-        conflict_times[blocked_mask[conflict_indices]] = np.inf
-        for position, sample_index in enumerate(conflict_indices):
-            value = float(low_geometry['sampleS'][sample_index])
-            left = int(low_geometry['leftCandidate'][sample_index])
-            right = int(low_geometry['rightCandidate'][sample_index])
-            start_s = float(low_geometry['segmentStartS'][sample_index])
-            end_s = float(low_geometry['segmentEndS'][sample_index])
-            blocked = bool(blocked_mask[sample_index])
+        conflict_times[blocked] = np.inf
+        candidate_s = prepared['candidateS']
+        for position, value in enumerate(constraint_s):
+            value = float(value)
+            right = min(
+                int(np.searchsorted(candidate_s, value, side='left')),
+                count - 1,
+            )
+            left = max(0, right - 1)
+            start_s = float(candidate_s[left])
+            end_s = float(candidate_s[right])
+            is_blocked = bool(blocked[position])
             high_speed = float(conflict_speeds[position])
             required_time = float(conflict_times[position])
-            if blocked or high_speed <= 1e-9 or np.isinf(required_time):
+            if is_blocked or high_speed <= 1e-9 or np.isinf(required_time):
                 # This interval cannot be entered; the existing stop-before
                 # handling will stop at its upstream candidate.
                 pair_required[right] = _maximum_optional(
@@ -721,14 +765,6 @@ def _build_candidate_constraints(
                 pair_speed_caps[left], high_speed)
             pair_speed_caps[right] = _minimum_optional(
                 pair_speed_caps[right], high_speed)
-            aeb_checks.append({
-                'highWhole': high_whole,
-                'highGeometry': high_geometry,
-                'lowS': value,
-                'stopIndex': int(
-                    max(0, left - 1)
-                    if value <= start_s + 1e-9 else left),
-            })
 
         raw_mask = ~np.isnan(pair_required)
         if not np.any(raw_mask):
@@ -752,7 +788,10 @@ def _build_candidate_constraints(
         'requiredTimes': required,
         'speedCaps': speed_caps,
         'segments': tuple(segments),
-        'aebChecks': tuple(aeb_checks),
+        'aebSources': tuple(aeb_sources),
+        'aebPositions': _unique_sorted_values(np.r_[
+            low_geometry['sampleS'], aeb_positions,
+        ]),
     }
 
 
@@ -910,7 +949,8 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
             prepared, limits, static, dynamic, segments)
 
     unsafe_stop_index = _first_aeb_unsafe_stop_index(
-        whole, prepared, constraints['aebChecks'])
+        whole, prepared, constraints['aebSources'],
+        constraints['aebPositions'])
     if unsafe_stop_index is not None:
         return _stop_at_candidate(
             prepared,
@@ -923,35 +963,44 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
     return whole
 
 
-def _first_aeb_unsafe_stop_index(low_whole, prepared, checks):
-    for check in sorted(checks, key=lambda value: value['lowS']):
-        low_s = float(check['lowS'])
+def _first_aeb_unsafe_stop_index(low_whole, prepared, sources, positions):
+    # AEB can need more than the ordinary 6 m clearance. Check each B
+    # sample and exact upstream constraint point against every predecessor.
+    if not sources:
+        return None
+    low_geometry = prepared['spatialGeometry']
+    candidate_s = prepared['candidateS']
+    for low_s in positions:
+        low_s = float(low_s)
         if low_s > low_whole.motionS[-1] + 1e-9:
-            continue
+            break
         arrival_time = low_whole.time_at_s(low_s)
         if not np.isfinite(arrival_time):
             continue
-
-        high_whole = check['highWhole']
-        if (not high_whole.stopped
-                and arrival_time > high_whole.motionTimes[-1] + 1e-9):
-            continue
-        high_s, high_speed = high_whole.state_at_time(arrival_time)
         low_speed = low_whole.speed_at_s(low_s)
-        delta_v = max(0.0, low_speed - high_speed)
-        aeb_gap = (
-            delta_v * delta_v
-            / (2.0 * COOPERATION_EMERGENCY_DECELERATION)
-            + COOPERATION_AEB_STATIC_GAP
-        )
-        if aeb_gap <= COOPERATION_STATIC_GAP + 1e-9:
-            continue
-
-        if _overlap_at_s(
-                prepared['spatialGeometry'], low_s,
-                check['highGeometry'], high_s,
-                aeb_gap):
-            return int(check['stopIndex'])
+        for high_whole, high_geometry in sources:
+            if (not high_whole.stopped
+                    and arrival_time > high_whole.motionTimes[-1] + 1e-9):
+                continue
+            high_s, high_speed = high_whole.state_at_time(arrival_time)
+            delta_v = max(0.0, low_speed - high_speed)
+            aeb_gap = (
+                delta_v * delta_v
+                / (2.0 * COOPERATION_EMERGENCY_DECELERATION)
+                + COOPERATION_AEB_STATIC_GAP
+            )
+            if _overlap_at_s(
+                    low_geometry, low_s, high_geometry, high_s,
+                    aeb_gap):
+                right = min(
+                    int(np.searchsorted(candidate_s, low_s, side='left')),
+                    len(candidate_s) - 1,
+                )
+                left = max(0, right - 1)
+                start_s = float(candidate_s[left])
+                return int(
+                    max(0, left - 1)
+                    if low_s <= start_s + 1e-9 else left)
     return None
 
 
@@ -1085,10 +1134,8 @@ def _motion_profile(node_s, speed_limits, static, dynamic, stopped):
     return speeds, segment_speeds, times
 
 
-def _last_conflicting_positions(
-        low_geometry, high_geometry, high_stopped, longitudinal_gap):
-    collision = _overlap_matrix(
-        low_geometry, high_geometry, longitudinal_gap)
+def _last_conflicting_positions(low_geometry, high_geometry, high_stopped):
+    collision = _overlap_matrix(low_geometry, high_geometry)
     high_count = len(high_geometry['sampleS'])
     high_indices = np.arange(high_count, dtype=int)
     last = np.max(np.where(collision, high_indices[None, :], -1), axis=1)
@@ -1113,7 +1160,7 @@ def _last_conflicting_positions(
             overlaps = _overlap_pairs(
                 low_centers, low_tangents, low_normals,
                 high_centers, high_tangents, high_normals,
-                low_geometry['halfLength'] + longitudinal_gap,
+                low_geometry['halfLength'],
                 low_geometry['halfWidth'],
                 high_geometry['halfLength'],
                 high_geometry['halfWidth'],
@@ -1124,7 +1171,7 @@ def _last_conflicting_positions(
     return conflict_s, blocked
 
 
-def _overlap_matrix(low, high, longitudinal_gap):
+def _overlap_matrix(low, high):
     delta = low['centers'][:, None, :] - high['centers'][None, :, :]
     low_tangent = low['tangents']
     low_normal = low['normals']
@@ -1136,7 +1183,7 @@ def _overlap_matrix(low, high, longitudinal_gap):
     tangent_normal = np.abs(low_tangent @ high_normal.T)
     normal_normal = np.abs(low_normal @ high_normal.T)
 
-    low_length = low['halfLength'] + longitudinal_gap
+    low_length = low['halfLength']
     low_width = low['halfWidth']
     high_length = high['halfLength']
     high_width = high['halfWidth']
@@ -1198,9 +1245,10 @@ def _overlap_at_s(low_geometry, low_s, high_geometry, high_s, gap):
     low_normal = np.column_stack((-low_tangent[:, 1], low_tangent[:, 0]))
     high_normal = np.column_stack((-high_tangent[:, 1], high_tangent[:, 0]))
     return bool(_overlap_pairs(
-        low_center, low_tangent, low_normal,
+        low_center + 0.5 * gap * low_tangent,
+        low_tangent, low_normal,
         high_center, high_tangent, high_normal,
-        low_geometry['halfLength'] + gap,
+        low_geometry['halfLength'] + 0.5 * gap,
         low_geometry['halfWidth'],
         high_geometry['halfLength'],
         high_geometry['halfWidth'],
