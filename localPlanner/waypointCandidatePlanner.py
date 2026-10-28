@@ -10,6 +10,7 @@ from localPlanner.pathGeometry import (
     project_to_polyline,
 )
 from parameters import (
+    PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE,
     VEHICLE_LANE_LOCATE_MAX_DISTANCE,
     WAYPOINT_CANDIDATE_SPACING,
 )
@@ -41,13 +42,14 @@ def build_base_waypoint_candidates(
     junction_intervals = _junction_intervals(
         path_xy, centerline_dict, junction_lane_ids,
         base_path_lane_ids, final_destination)
-    lane_change_intervals = [
-        (entrance_s, exit_s)
-        for entrance_s, exit_s in _lane_change_intervals(
-            path_xy, lane_change_boundaries)
-        if not (_s_inside_junction_interval(entrance_s, junction_intervals)
-                or _s_inside_junction_interval(exit_s, junction_intervals))
-    ]
+    lane_change_intervals = _clip_lane_change_intervals(
+        path_xy,
+        _lane_change_intervals(path_xy, lane_change_boundaries),
+        junction_intervals,
+        centerline_dict,
+        junction_lane_ids,
+        base_path_lane_ids,
+    )
     regular_s = np.arange(0.0, total, WAYPOINT_CANDIDATE_SPACING)
     for entrance_s, exit_s in lane_change_intervals:
         rounded_s = np.round(regular_s, 6)
@@ -253,6 +255,48 @@ def _s_inside_junction_interval(value, intervals):
         or (entrance_s <= 1e-6 and value <= 1e-6)
         for entrance_s, exit_s in intervals
     )
+
+
+def _clip_lane_change_intervals(
+        path, lane_changes, junctions, centerline_dict,
+        junction_lane_ids, path_lane_ids):
+    path_s = np.concatenate(([0.0], np.cumsum(
+        np.linalg.norm(np.diff(path, axis=0), axis=1))))
+    junction_ids = {str(lane_id) for lane_id in junction_lane_ids}
+    clipped = []
+    for entrance_s, exit_s in lane_changes:
+        new_entrance, new_exit = entrance_s, exit_s
+        for junction_entrance, junction_exit in junctions:
+            if _s_inside_junction_interval(entrance_s, [(
+                    junction_entrance, junction_exit)]):
+                new_entrance = max(new_entrance, junction_exit)
+            if _s_inside_junction_interval(exit_s, [(
+                    junction_entrance, junction_exit)]):
+                new_exit = min(new_exit, junction_entrance)
+        if new_exit <= new_entrance + 1e-6:
+            continue
+        if new_entrance != entrance_s or new_exit != exit_s:
+            source_line = None
+            if path_lane_ids is not None and len(path_lane_ids) == len(path):
+                for value, lane_id in zip(path_s, path_lane_ids):
+                    lane_id = str(lane_id)
+                    if (new_entrance - 1e-6 <= value <= new_exit + 1e-6
+                            and lane_id not in junction_ids
+                            and lane_id in centerline_dict):
+                        line = clean_xy(centerline_dict[lane_id])
+                        if len(line) >= 2:
+                            source_line = line
+                            break
+            if source_line is not None:
+                first_d = project_to_polyline(
+                    point_at_s(path, new_entrance), source_line)['d']
+                last_d = project_to_polyline(
+                    point_at_s(path, new_exit), source_line)['d']
+                if (abs(last_d - first_d)
+                        <= PATH_LANE_CHANGE_MIN_LATERAL_DISTANCE):
+                    continue
+        clipped.append((new_entrance, new_exit))
+    return clipped
 
 
 def _lane_change_intervals(path, lane_change_boundaries):
