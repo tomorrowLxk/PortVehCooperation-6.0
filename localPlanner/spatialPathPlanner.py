@@ -23,6 +23,7 @@ from localPlanner.pathGeometry import (
     truncate_polyline,
 )
 from parameters import (
+    PATH_CURVATURE_SMOOTHING_POINTS,
     PATH_CURVATURE_TOLERANCE,
     PATH_CURVATURE_WINDOW,
     PATH_COLLISION_SAMPLE_SPACING,
@@ -51,6 +52,29 @@ from parameters import (
 
 
 PATH_ON_LINE_POSITION_TOLERANCE = 1e-2
+
+
+def _max_validation_curvature(path):
+    "对空间验收用的曲率序列做固定点数中值平滑。"
+    curvature = path_curvatures(path, PATH_CURVATURE_WINDOW)
+    if len(curvature) <= 2:
+        return 0.0
+    radius = PATH_CURVATURE_SMOOTHING_POINTS // 2
+    if radius == 0:
+        return float(np.max(curvature))
+    count = len(curvature)
+    if count >= 2 * radius + 1:
+        windows = np.lib.stride_tricks.sliding_window_view(
+            curvature, 2 * radius + 1)
+        maximum = float(np.max(np.median(windows, axis=1)))
+    else:
+        maximum = 0.0
+    for index in list(range(min(radius, count))) + list(range(
+            max(radius, count - radius), count)):
+        maximum = max(maximum, float(np.median(curvature[
+            max(0, index - radius):min(count, index + radius + 1)
+        ])))
+    return maximum
 
 
 @dataclass
@@ -1126,9 +1150,7 @@ def _strict_candidates(
                 score = length + PATH_REFERENCE_WEIGHT * lateral
                 safe_baselines.append((score, node_path))
 
-                maximum = float(np.max(path_curvatures(
-                    path, PATH_CURVATURE_WINDOW
-                ))) if len(path) > 2 else 0.0
+                maximum = _max_validation_curvature(path)
                 limit = (
                     PATH_CURVATURE_TOLERANCE
                     / max(float(static_info["minTurningRadius"]), 1e-6)
@@ -1217,10 +1239,7 @@ def _strict_candidates(
             if edge_ids and graph.edges[edge_ids[-1]].kind == "GLOBAL":
                 curvature_edge_ids = edge_ids[:-1]
             curvature_path = _join_edges(graph, curvature_edge_ids)
-            maximum = float(np.max(path_curvatures(
-                curvature_path,
-                PATH_CURVATURE_WINDOW,
-            ))) if len(curvature_path) > 2 else 0.0
+            maximum = _max_validation_curvature(curvature_path)
             limit = (
                 PATH_CURVATURE_TOLERANCE
                 / max(float(static_info["minTurningRadius"]), 1e-6)
@@ -1419,9 +1438,7 @@ def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
     if edge.kind in ("SAME", "GLOBAL"):
         edge.state = "VALID"
         return
-    maximum = float(np.max(path_curvatures(
-        edge.geometry, PATH_CURVATURE_WINDOW
-    ))) if len(edge.geometry) > 2 else 0.0
+    maximum = _max_validation_curvature(edge.geometry)
     edge.maxCurvature = maximum
     limit = (
         PATH_CURVATURE_TOLERANCE
@@ -1494,8 +1511,7 @@ def _invalid_pair(
                 PATH_COLLISION_SAMPLE_SPACING,
             )
         else:
-            maximum = float(np.max(path_curvatures(
-                joined, PATH_CURVATURE_WINDOW)))
+            maximum = _max_validation_curvature(joined)
             invalid = maximum > (
                 PATH_CURVATURE_TOLERANCE
                 / max(float(static_info["minTurningRadius"]), 1e-6)

@@ -86,6 +86,7 @@ PATH_CURVE_SAMPLE_SPACING = 0.5  # Hermite、Frenet曲线及中心线polygon粗�
 PATH_COLLISION_SAMPLE_SPACING = 0.5  # 候选path连续车辆扫掠检查的纵向采样间距，单位m
 PATH_OUTPUT_POINT_SPACING = 1.0  # 空间path最终输出的重采样间距，单位m
 PATH_CURVATURE_WINDOW = 5.0  # 评价曲率时使用的前后弧长窗口，单位m
+PATH_CURVATURE_SMOOTHING_POINTS = 5  # Odd median window size for spatial curvature validation
 PATH_CURVATURE_TOLERANCE = 1.1  # 人工跨线曲线相对最小转弯半径的曲率容差倍率
 PATH_LATERAL_SAFETY_MARGIN = 1.0  # 正常path后验证时叠加到本车横向占用上的固定冗余，单位m
 PATH_STATIC_STOP_DISTANCE = 6.0  # polygon上游T点要求的车头静态停车净距，单位m
