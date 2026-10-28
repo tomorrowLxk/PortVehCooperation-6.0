@@ -65,7 +65,10 @@ def build_base_waypoint_candidates(
             WAYPOINT_CANDIDATE_JUNCTION_EXIT)
     for entrance_s, exit_s in lane_change_intervals:
         for value in tuple(candidate_types):
-            if entrance_s + 1e-6 < value < exit_s - 1e-6:
+            if (entrance_s + 1e-6 < value < exit_s - 1e-6
+                    and not candidate_types[value] & (
+                        WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE
+                        | WAYPOINT_CANDIDATE_JUNCTION_EXIT)):
                 candidate_types.pop(value)
         _merge_candidate_type(
             candidate_types, entrance_s,
@@ -83,13 +86,16 @@ def build_base_waypoint_candidates(
     inside = _points_inside_junction_lanes(
         points, centerline_dict, relevant_junction_lane_ids)
 
-    # basePath起点属于固定基础候选；本帧当前位置只在future候选中加入。
+    # A start inside a junction is not an eligible base waypoint;
+    # the current position is added separately to future candidates.
     candidate_type = np.asarray([
         candidate_types[round(float(value), 6)]
         for value in sample_s
     ], dtype=float)
     keep = ~inside | (candidate_type != WAYPOINT_CANDIDATE_REGULAR)
-    keep[0] = True
+    keep[0] = not any(
+        entrance_s <= 1e-6 < exit_s
+        for entrance_s, exit_s in junction_intervals)
     if (final_destination is not None
             and np.linalg.norm(
                 points[-1] - np.asarray(final_destination, dtype=float)[:2]
@@ -165,6 +171,7 @@ def build_future_waypoint_candidates(
 
 def _s_inside_candidate_junction(value, candidates):
     entrances = []
+    seen_boundary = False
     for candidate in candidates:
         if len(candidate) < 4:
             continue
@@ -173,12 +180,19 @@ def _s_inside_candidate_junction(value, candidates):
         if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE:
             entrances.append(candidate_s)
         if candidate_type & WAYPOINT_CANDIDATE_JUNCTION_EXIT:
+            if (not seen_boundary
+                    and 1e-6 < value < candidate_s - 1e-6):
+                return True
             for index, entrance_s in enumerate(entrances):
                 if candidate_s > entrance_s + 1e-6:
                     if entrance_s + 1e-6 < value < candidate_s - 1e-6:
                         return True
                     entrances.pop(index)
                     break
+        if candidate_type & (
+                WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE
+                | WAYPOINT_CANDIDATE_JUNCTION_EXIT):
+            seen_boundary = True
     return False
 
 
@@ -186,6 +200,11 @@ def _junction_intervals(
         path, centerline_dict, junction_lane_ids,
         base_path_lane_ids=None, final_destination=None):
     intervals = []
+    start_lane_id = (
+        str(base_path_lane_ids[0])
+        if base_path_lane_ids is not None and len(base_path_lane_ids)
+        else None
+    )
     terminal_lane_id = None
     if (final_destination is not None
             and base_path_lane_ids is not None
@@ -208,20 +227,29 @@ def _junction_intervals(
             continue
         entrance = project_to_polyline(lane[0], path)
         exit_point = project_to_polyline(lane[-1], path)
-        if (entrance['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
+        entrance_s = float(entrance['s'])
+        entrance_distance = float(entrance['distance'])
+        if lane_id == start_lane_id:
+            start_on_lane = project_to_polyline(path[0], lane)
+            if (start_on_lane['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
+                    and 1e-6 < start_on_lane['s']
+                    < polyline_length(lane) - 1e-6):
+                entrance_s = 0.0
+                entrance_distance = 0.0
+        if (entrance_distance <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
                 and exit_point['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
-                and exit_point['s'] > entrance['s'] + 1e-6):
+                and exit_point['s'] > entrance_s + 1e-6):
             intervals.append((
-                float(entrance['s']), float(exit_point['s'])))
+                entrance_s, float(exit_point['s'])))
         elif (lane_id == terminal_lane_id
-              and entrance['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE):
+              and entrance_distance <= VEHICLE_LANE_LOCATE_MAX_DISTANCE):
             destination = project_to_polyline(path[-1], lane)
             lane_length = polyline_length(lane)
             path_length = polyline_length(path)
             if (destination['distance'] <= VEHICLE_LANE_LOCATE_MAX_DISTANCE
                     and 1e-6 < destination['s'] < lane_length - 1e-6
-                    and path_length > entrance['s'] + 1e-6):
-                intervals.append((float(entrance['s']), path_length))
+                    and path_length > entrance_s + 1e-6):
+                intervals.append((entrance_s, path_length))
     return sorted(set(
         (round(entrance_s, 6), round(exit_s, 6))
         for entrance_s, exit_s in intervals
