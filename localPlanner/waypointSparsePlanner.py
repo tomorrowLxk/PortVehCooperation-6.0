@@ -173,7 +173,6 @@ def _candidate_junction_intervals(candidate_s, candidate_types):
         candidate_types,
         WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
         WAYPOINT_CANDIDATE_JUNCTION_EXIT,
-        initial_exit=True,
     )
 
 
@@ -187,8 +186,7 @@ def _candidate_lane_change_intervals(candidate_s, candidate_types):
 
 
 def _candidate_intervals(
-        candidate_s, candidate_types, entrance_type, exit_type,
-        initial_exit=False):
+        candidate_s, candidate_types, entrance_type, exit_type):
     entrances = []
     intervals = []
     for value, candidate_type in zip(candidate_s, candidate_types):
@@ -200,10 +198,6 @@ def _candidate_intervals(
                     intervals.append((entrance_s, float(value)))
                     entrances.pop(index)
                     break
-            else:
-                if (initial_exit and not entrances and not intervals
-                        and value > 1e-6):
-                    intervals.append((0.0, float(value)))
     return intervals
 
 

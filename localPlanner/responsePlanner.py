@@ -165,7 +165,6 @@ def _candidate_junction_intervals(base_candidates):
         base_candidates,
         WAYPOINT_CANDIDATE_JUNCTION_ENTRANCE,
         WAYPOINT_CANDIDATE_JUNCTION_EXIT,
-        initial_exit=True,
     )
 
 
@@ -177,8 +176,7 @@ def _candidate_lane_change_intervals(base_candidates):
     )
 
 
-def _candidate_intervals(
-        base_candidates, entrance_type, exit_type, initial_exit=False):
+def _candidate_intervals(base_candidates, entrance_type, exit_type):
     if base_candidates is None:
         return []
     candidates = np.asarray(base_candidates, dtype=float)
@@ -197,10 +195,6 @@ def _candidate_intervals(
                     intervals.append((entrance, value))
                     entrances.pop(index)
                     break
-            else:
-                if (initial_exit and not entrances and not intervals
-                        and value > 1e-6):
-                    intervals.append((0.0, value))
     return intervals
 
 
