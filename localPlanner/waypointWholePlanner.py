@@ -696,20 +696,22 @@ def _build_candidate_constraints(
             blocked = bool(blocked_mask[sample_index])
             high_speed = float(conflict_speeds[position])
             required_time = float(conflict_times[position])
-            if blocked or high_speed <= 1e-9:
-                left_required = required_time
-                right_required = required_time
-            else:
-                transfer_speed = max(
-                    COOPERATION_STOP_SPEED_THRESHOLD,
-                    min(float(current_speed), high_speed),
-                )
-                left_required = max(
-                    0.0,
-                    required_time - (value - start_s) / transfer_speed,
-                )
-                right_required = (
-                    required_time + (end_s - value) / transfer_speed)
+            if blocked or high_speed <= 1e-9 or np.isinf(required_time):
+                # This interval cannot be entered; the existing stop-before
+                # handling will stop at its upstream candidate.
+                pair_required[right] = _maximum_optional(
+                    pair_required[right], np.inf)
+                continue
+            transfer_speed = max(
+                COOPERATION_STOP_SPEED_THRESHOLD,
+                min(float(current_speed), high_speed),
+            )
+            left_required = max(
+                0.0,
+                required_time - (value - start_s) / transfer_speed,
+            )
+            right_required = (
+                required_time + (end_s - value) / transfer_speed)
 
             pair_required[left] = _maximum_optional(
                 pair_required[left], left_required)
@@ -826,26 +828,19 @@ def _fill_segment_constraints(required, speed_caps, candidate_s, segments):
     raw_caps = speed_caps.copy()
     for start, end in segments:
         indices = np.arange(start, end + 1)
-        known = indices[~np.isnan(raw_required[indices])]
+        known = indices[np.isfinite(raw_required[indices])]
         if len(known) == 0:
             continue
         required[known] = raw_required[known]
         missing = indices[np.isnan(raw_required[indices])]
         if len(known) == 1:
-            required[indices] = raw_required[known[0]]
+            required[missing] = raw_required[known[0]]
         elif len(missing):
-            if np.all(np.isfinite(raw_required[known])):
-                required[missing] = np.interp(
-                    candidate_s[missing],
-                    candidate_s[known],
-                    raw_required[known],
-                )
-            else:
-                for index in missing:
-                    nearest = known[int(np.argmin(
-                        np.abs(candidate_s[known] - candidate_s[index])
-                    ))]
-                    required[index] = raw_required[nearest]
+            required[missing] = np.interp(
+                candidate_s[missing],
+                candidate_s[known],
+                raw_required[known],
+            )
 
         cap_known = indices[~np.isnan(raw_caps[indices])]
         if len(cap_known) == 1:
