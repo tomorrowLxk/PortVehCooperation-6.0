@@ -917,21 +917,38 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
             continue
 
         node_index = int(candidate_nodes[index])
-        lowest_limits = limits.copy()
         first_adjustable = 1 if node_index > 0 else 0
-        lowest_limits[first_adjustable:node_index + 1] = np.minimum(
-            lowest_limits[first_adjustable:node_index + 1],
-            COOPERATION_STOP_SPEED_THRESHOLD,
-        )
-        lowest_arrival = _candidate_arrival_time(
-            prepared, lowest_limits, static, dynamic, index)
-        if lowest_arrival < required_time - 1e-6:
+        def capped_arrival(start_node):
+            capped = limits.copy()
+            capped[start_node:node_index + 1] = np.minimum(
+                capped[start_node:node_index + 1],
+                COOPERATION_STOP_SPEED_THRESHOLD,
+            )
+            return _candidate_arrival_time(
+                prepared, capped, static, dynamic, index)
+
+        if capped_arrival(first_adjustable) < required_time - 1e-6:
             return _stop_before_constraint(
                 prepared, limits, index, segments, static, dynamic)
 
+        # Find the latest candidate interval that can absorb this delay.
+        # The acceleration envelope may still move braking farther upstream.
+        if index > 1:
+            left, right = 0, index - 1
+            while left < right:
+                middle_index = (left + right + 1) // 2
+                start_node = int(candidate_nodes[middle_index]) + 1
+                if capped_arrival(start_node) >= required_time - 1e-6:
+                    left = middle_index
+                else:
+                    right = middle_index - 1
+            first_adjustable = int(candidate_nodes[left]) + 1
+
         lower = COOPERATION_STOP_SPEED_THRESHOLD
         upper = float(np.max(limits[first_adjustable:node_index + 1]))
-        selected_limits = lowest_limits
+        selected_limits = limits.copy()
+        selected_limits[first_adjustable:node_index + 1] = np.minimum(
+            selected_limits[first_adjustable:node_index + 1], lower)
         for _ in range(18):
             middle = 0.5 * (lower + upper)
             candidate_limits = limits.copy()
