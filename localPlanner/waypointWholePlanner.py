@@ -375,6 +375,7 @@ def should_replace_waypoint_whole(
     if len(old_path) < 2 or len(new_path) < 2:
         return True
     current_s = project_to_polyline(current_position, old_path)['s']
+    current_segment_skipped = False
     for start_x, start_y, end_x, end_y, issued_speed in dispatched_segments:
         start_xy = (start_x, start_y)
         end_xy = (end_x, end_y)
@@ -382,8 +383,11 @@ def should_replace_waypoint_whole(
             continue  # Repeated-point stop PathVO has no travel interval.
         old_start = project_to_polyline(start_xy, old_path)['s']
         old_end = project_to_polyline(end_xy, old_path)['s']
-        if old_end <= current_s + 1e-6 or old_start < current_s - 1e-6:
-            continue  # Passed or currently executing segment.
+        if old_end <= current_s + 1e-6:
+            continue  # Already passed.
+        if not current_segment_skipped:
+            current_segment_skipped = True
+            continue  # The first unfinished PathVO is being executed.
         if old_end <= old_start + 1e-9:
             continue
         new_start = project_to_polyline(start_xy, new_path)['s']
