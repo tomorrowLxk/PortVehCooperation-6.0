@@ -226,6 +226,7 @@ class VehicleSimulator:
         self.speed = float(static_info['_initialSpeed'])
         self.arrived = False
         self.reachedEndpoint = False
+        self.finalNavigationReceived = False
         self.executionPath = np.asarray([[self.x, self.y]], dtype=float)
         self.executionArc = np.asarray([0.0], dtype=float)
         self.speedEndS = np.empty(0, dtype=float)
@@ -254,6 +255,8 @@ class VehicleSimulator:
         lastPathVoPoint = None
 
         for segment in response.get('shortPathList') or ():
+            if segment.get('isFinalDestination', False):
+                self.finalNavigationReceived = True
             speed = max(0.0, float(segment.get('speedLimit') or 0.0))
             rawPoints = segment.get('points') or ()
             if rawPoints:
@@ -327,6 +330,17 @@ class VehicleSimulator:
         waypointProgress = np.maximum.accumulate(waypointProgress)
         self.speedEndS = waypointProgress[1:].copy()
         self.segmentSpeeds = np.asarray(intervalSpeeds, dtype=float)
+        currentProgress = project_to_polyline(
+            np.asarray([self.x, self.y]), self.executionPath)['s']
+        if waypointProgress[0] > currentProgress + 1e-6:
+            approachSpeed = 0.5 * (
+                self.speed + float(self.segmentSpeeds[0]))
+            self.speedEndS = np.r_[
+                waypointProgress[0], self.speedEndS,
+            ]
+            self.segmentSpeeds = np.r_[
+                approachSpeed, self.segmentSpeeds,
+            ]
 
     def _stop_at_current_position(self):
         self.executionPath = np.asarray([[self.x, self.y]], dtype=float)
@@ -372,9 +386,9 @@ class VehicleSimulator:
 
         distanceToDestination = np.linalg.norm(
             np.asarray([self.x, self.y]) - self.route[-1])
-        if distanceToDestination < 1.5:
+        if self.finalNavigationReceived and distanceToDestination < 1.5:
             self.arrived = True
-        if distanceToDestination <= 1e-6:
+        if self.finalNavigationReceived and distanceToDestination <= 1e-6:
             self.reachedEndpoint = True
             self.speed = 0.0
         self.history.append(np.asarray([self.x, self.y], dtype=float))
