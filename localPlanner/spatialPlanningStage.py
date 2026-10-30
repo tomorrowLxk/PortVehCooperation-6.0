@@ -185,6 +185,7 @@ def plan_agv_spatial(
             current_position=position,
             current_heading=heading,
             reference_line=reference_line,
+            current_lane_id=drivable_area_planner.lastLaneId,
             destination_lane_id=(
                 drivable_area_planner.referLaneIds[-1]
                 if drivable_area_planner.referLaneIds else None

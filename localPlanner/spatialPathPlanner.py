@@ -316,7 +316,8 @@ def plan_spatial_path(
         drivable_lines, current_position, current_heading, reference_line,
         polygons, vehicle_static_info, vehicle_dynamic_info,
         reverse_point=None, stop_at_route_end=False,
-        continuation_path=None, destination_lane_id=None):
+        continuation_path=None, destination_lane_id=None,
+        current_lane_id=None):
     current = np.asarray(current_position, dtype=float)[:2]
     reference = clean_xy(reference_line)
     if (stop_at_route_end and len(reference) == 1
@@ -344,6 +345,7 @@ def plan_spatial_path(
         current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
         continuation_path, stop_at_route_end, destination_lane_id,
+        current_lane_id,
     )
     searchNodePaths = []
     searchGoals = graph.goals
@@ -495,7 +497,7 @@ def _build_graph(
         lines, line_lane_segments,
         current, current_heading, reference, polygons,
         static_info, dynamic_info, reverse_point, continuation_path,
-        stop_at_route_end, destination_lane_id):
+        stop_at_route_end, destination_lane_id, current_lane_id):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
     cross_metric = max(line_metrics, key=lambda metric: metric.total)
@@ -504,6 +506,23 @@ def _build_graph(
         range(len(lines)),
         key=lambda index: current_projections[index]["distance"],
     )
+    if current_lane_id is not None:
+        matched_junction_lines = [
+            index for index, segments in enumerate(line_lane_segments)
+            if any(
+                segment.isJunction
+                and str(segment.laneId) == str(current_lane_id)
+                and segment.startS - 1e-6
+                <= current_projections[index]["s"]
+                < segment.endS - 1e-6
+                for segment in segments
+            )
+        ]
+        if matched_junction_lines:
+            current_line = min(
+                matched_junction_lines,
+                key=lambda index: current_projections[index]["distance"],
+            )
     reference_start_projection = reference_metric.project(current)
     reference_start_s = reference_start_projection["s"]
     nodes = {
@@ -725,6 +744,11 @@ def _build_graph(
         target_s = target.lineS[current_line]
         if target_s <= current_start_s + 1e-6:
             continue
+        if (current_junction_end_s is not None
+                and abs(target_s - current_junction_end_s) > 1e-6
+                and not (target_id == reverse_id
+                         and target_s < current_junction_end_s)):
+            continue
         is_current_junction_exit = (
             current_junction_end_s is not None
             and abs(target_s - current_junction_end_s) <= 1e-6
@@ -787,6 +811,8 @@ def _build_graph(
         for source_id, distance in zip(sources, distances):
             lateral_to_line[(source_id, target_line)] = float(distance)
     for source_id in sources:
+        if source_id == "S" and current_junction_end_s is not None:
+            continue
         source = nodes[source_id]
         source_lines = set(source.lineS)
         for target_line, group in line_nodes.items():
@@ -817,7 +843,12 @@ def _build_graph(
         destination_id = goals[0]
         destination = nodes[destination_id]
         terminal_sources = list(line_nodes[primary_line])
-        if current_line == primary_line:
+        if (current_line == primary_line
+                and (current_junction_end_s is None
+                     or destination.referenceS <= reference_metric.project(
+                         line_metrics[current_line].values_at(
+                             [current_junction_end_s])[0][0]
+                     )["s"] + 1e-6)):
             terminal_sources.insert(0, "S")
         for source_id in terminal_sources:
             source = nodes[source_id]
@@ -848,10 +879,11 @@ def _build_graph(
         lines, line_metrics, reference_metric, cross_metric,
         nodes, edges, adjacency, goals, stops,
         primary_line, current_line)
-    _prefer_safe_continuation_edge(
-        graph, edge_keys, continuation_path,
-        polygons, static_info, dynamic_info,
-    )
+    if current_junction_end_s is None:
+        _prefer_safe_continuation_edge(
+            graph, edge_keys, continuation_path,
+            polygons, static_info, dynamic_info,
+        )
     return graph
 
 
