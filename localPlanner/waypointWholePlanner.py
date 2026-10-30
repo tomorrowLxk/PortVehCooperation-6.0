@@ -24,6 +24,7 @@ from parameters import (
     WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
     WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION,
     WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE,
+    WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE,
 )
 
 
@@ -344,7 +345,18 @@ def align_old_waypoint_whole(old_whole, current_position, with_path_s=False):
     return (aligned, path_s) if with_path_s else aligned
 
 
-def should_replace_waypoint_whole(aligned_old, new_whole):
+def _motion_interval_time(whole, start_s, end_s):
+    boundaries = whole.motionS
+    speeds = whole.motionSegmentSpeeds
+    lengths = np.maximum(0.0, np.minimum(boundaries[1:], end_s) - np.maximum(boundaries[:-1], start_s))
+    if np.any((lengths > 1e-9) & (speeds <= 1e-9)):
+        return float('inf')
+    return float(np.sum(np.divide(lengths, speeds, out=np.zeros_like(lengths), where=speeds > 1e-9)))
+
+
+def should_replace_waypoint_whole(
+        aligned_old, new_whole, old_whole, dispatched_segments,
+        current_position):
     "比较同一起点、同一时间原点的新旧结果，判断是否需要重新下发。"
     if aligned_old.stopped != new_whole.stopped:
         return True
@@ -356,26 +368,52 @@ def should_replace_waypoint_whole(aligned_old, new_whole):
     if aligned_old.stopped:
         return False
 
-    common_length = min(old_length, new_length)
-    sample_s = _unique_sorted_values(np.r_[
-        0.0,
-        aligned_old.motionS[aligned_old.motionS <= common_length + 1e-9],
-        new_whole.motionS[new_whole.motionS <= common_length + 1e-9],
-        common_length,
-    ])
-    if len(sample_s) < 2:
-        old_speeds = np.asarray([aligned_old.terminalSpeed])
-        new_speeds = np.asarray([new_whole.terminalSpeed])
-    else:
-        sample_midpoints = 0.5 * (sample_s[:-1] + sample_s[1:])
-        _, old_speeds = _whole_states_at_s(aligned_old, sample_midpoints)
-        _, new_speeds = _whole_states_at_s(new_whole, sample_midpoints)
-    if not np.all(np.isfinite(old_speeds) & np.isfinite(new_speeds)):
+    if not dispatched_segments:
         return True
-    return bool(np.any(
-        np.abs(old_speeds - new_speeds)
-        > WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE
-    ))
+    old_path = old_whole.futurePath
+    new_path = new_whole.futurePath
+    if len(old_path) < 2 or len(new_path) < 2:
+        return True
+    current_s = project_to_polyline(current_position, old_path)['s']
+    for start_x, start_y, end_x, end_y, issued_speed in dispatched_segments:
+        start_xy = (start_x, start_y)
+        end_xy = (end_x, end_y)
+        if math.hypot(end_x - start_x, end_y - start_y) <= 1e-9:
+            continue  # Repeated-point stop PathVO has no travel interval.
+        old_start = project_to_polyline(start_xy, old_path)['s']
+        old_end = project_to_polyline(end_xy, old_path)['s']
+        if old_end <= current_s + 1e-6 or old_start < current_s - 1e-6:
+            continue  # Passed or currently executing segment.
+        if old_end <= old_start + 1e-9:
+            continue
+        new_start = project_to_polyline(start_xy, new_path)['s']
+        new_end = project_to_polyline(end_xy, new_path)['s']
+        if new_end <= new_start + 1e-9 or new_end > new_length + 1e-6:
+            continue  # Outside the comparable speed-planning range.
+        distance = new_end - new_start
+        new_time = _motion_interval_time(new_whole, new_start, new_end)
+        new_speed = (
+            distance / new_time
+            if np.isfinite(new_time) and new_time > 1e-9 else 0.0
+        )
+        old_speed = max(0.0, float(issued_speed))
+        old_time = (
+            (old_end - old_start) / old_speed
+            if old_speed > 1e-9 else float('inf')
+        )
+        speed_changed = (
+            abs(new_speed - old_speed)
+            > WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE
+        )
+        time_changed = (
+            abs(new_time - old_time)
+            > WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE
+            if np.isfinite(new_time) and np.isfinite(old_time)
+            else np.isfinite(new_time) != np.isfinite(old_time)
+        )
+        if speed_changed and time_changed:
+            return True
+    return False
 
 
 def _path_within_distance(source, target, max_distance):
@@ -431,7 +469,8 @@ def _spatially_consistent_whole_paths(
 
 def select_effective_waypoint_whole(
         new_whole, old_whole, has_sparse_cache,
-        must_dispatch, must_not_dispatch, current_position):
+        must_dispatch, must_not_dispatch, current_position,
+        dispatched_segments=None):
     """沿用下发判据，在本车规划后立即确定后车实际看到的结果。"""
     has_history = old_whole is not None and has_sparse_cache
     if must_dispatch or not has_history:
@@ -446,7 +485,9 @@ def select_effective_waypoint_whole(
     aligned_old, old_path_s = align_old_waypoint_whole(
         old_whole, current_position, with_path_s=True,
     )
-    if should_replace_waypoint_whole(aligned_old, new_whole):
+    if should_replace_waypoint_whole(
+            aligned_old, new_whole, old_whole, dispatched_segments,
+            current_position):
         return new_whole, None
     return aligned_old, old_path_s
 

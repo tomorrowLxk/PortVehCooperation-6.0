@@ -957,6 +957,7 @@ class PlanningEngine:
                 vehicleId in self.vehicleIdsMustDispatch,
                 vehicleId in self.vehicleIdsMustNotDispatch,
                 self.vehicleDynamicInfoCaches[vehicleId]['position'],
+                self.vehicleDispatchedPathVOCaches.get(vehicleId),
             )
 
         newWaypointWholeResults = {}
