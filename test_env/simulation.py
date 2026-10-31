@@ -17,9 +17,7 @@ from localPlanner.pathGeometry import (
     point_at_s,
     project_points_to_polyline,
     project_to_polyline,
-    slice_polyline,
 )
-from localPlanner.pathCollision import path_vehicle_intersects, vehicle_polygon
 
 
 @dataclass
@@ -250,10 +248,11 @@ class VehicleSimulator:
             'direction': 1,
         }
 
-    def apply_response(self, response, future_path, vehicles=None):
+    def apply_response(self, response, future_path):
         waypointPoints = []
         intervalSpeeds = []
         singlePointCommandSpeed = 0.0
+        firstCommandSpeed = None
         pathVoFirstPoints = []
         lastPathVoPoint = None
 
@@ -263,6 +262,8 @@ class VehicleSimulator:
             speed = max(0.0, float(segment.get('speedLimit') or 0.0))
             rawPoints = segment.get('points') or ()
             if rawPoints:
+                if firstCommandSpeed is None:
+                    firstCommandSpeed = speed
                 singlePointCommandSpeed = max(singlePointCommandSpeed, speed)
                 firstPoint = rawPoints[0]
                 pathVoFirstPoints.append(np.asarray(
@@ -293,13 +294,7 @@ class VehicleSimulator:
             return
 
         waypointPoints = np.asarray(waypointPoints, dtype=float)
-        firstSpeed = (
-            intervalSpeeds[0]
-            if len(waypointPoints) > 1 else singlePointCommandSpeed
-        )
-        if (firstSpeed <= 1e-9 and vehicles is not None
-                and self._blocked_before_first_waypoint(
-                    future_path, waypointPoints[0], vehicles)):
+        if firstCommandSpeed <= 1e-9:
             self._stop_at_current_position()
             return
         if len(waypointPoints) == 1:
@@ -355,27 +350,6 @@ class VehicleSimulator:
             self.segmentSpeeds = np.r_[
                 approachSpeed, self.segmentSpeeds,
             ]
-
-    def _blocked_before_first_waypoint(self, future_path, first_point, vehicles):
-        path = clean_xy(future_path)
-        if len(path) < 2:
-            return False
-        current_s = float(project_to_polyline(
-            np.asarray([self.x, self.y]), path)['s'])
-        first_s = float(project_to_polyline(first_point, path)['s'])
-        if first_s <= current_s + 1e-6:
-            return False
-        approach_path = slice_polyline(path, current_s, first_s)
-        polygons = [
-            vehicle_polygon(
-                [other.x, other.y], other.heading,
-                other.length, other.width, 0.0, 0.0)
-            for other in vehicles.values()
-            if other is not self
-        ]
-        return path_vehicle_intersects(
-            approach_path, polygons, self.length, self.width,
-            0.0, 0.0, 0.0, 1.0)
 
     def _stop_at_current_position(self):
         self.executionPath = np.asarray([[self.x, self.y]], dtype=float)
