@@ -36,6 +36,10 @@ from localPlanner.spatialPlanningStage import (
     plan_hv_spatial,
 )
 from localPlanner.pathCollision import path_vehicle_intersects
+from localPlanner.responseCrossFilter import (
+    is_current_position_stop,
+    select_noncrossing_responses,
+)
 from localPlanner.responsePlanner import build_response_path_lists
 from localPlanner.pathGeometry import (
     clean_xy,
@@ -62,7 +66,10 @@ from localPlanner.waypointSparsePlanner import (
 
 
 class PlanningEngine:
-    def __init__(self) -> None:
+    def __init__(self, *, if_cross=True, output_cross_clearance_m=6.0) -> None:
+        self.if_cross = bool(if_cross)
+        self.output_cross_clearance_m = max(
+            6.0, float(output_cross_clearance_m))
         # 长路径计算结果
         self.responses = None
         self.shortPathFailedVehicleIds = []
@@ -1000,6 +1007,31 @@ class PlanningEngine:
         # todo. 十三、仅为本帧确实需要更新的车辆填充并返回短路径结果。
         allResponses = self.responses
         finalResponses = []
+        noncrossWaypoints = None
+        if not self.if_cross:
+            candidatesToIssue = {
+                str(request.get('deviceId')): waypointSparseResults[
+                    str(request.get('deviceId'))]
+                for request in requests
+                if (str(request.get('deviceId'))
+                    in self.vehicleIdsNeedWaypointUpdate
+                    and str(request.get('deviceId'))
+                    not in self.finalDestinationVehicleIds
+                    and request.get('deviceType') == 'AGV'
+                    and not is_current_position_stop(
+                        effectiveWaypointWholeResults[
+                            str(request.get('deviceId'))],
+                        self.vehicleDynamicInfoCaches[
+                            str(request.get('deviceId'))]))
+            }
+            noncrossWaypoints = select_noncrossing_responses(
+                candidate_waypoints=candidatesToIssue,
+                priority_decisions=priorityDecisions,
+                cached_responses=self.vehicleWaypointResponseCaches,
+                vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
+                vehicle_static_info=self.vehicleStaticInfoCaches,
+                stop_clearance=self.output_cross_clearance_m,
+            )
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
             if vehicleId in self.finalDestinationVehicleIds:
@@ -1020,7 +1052,12 @@ class PlanningEngine:
                 responseJunctionLaneIds = planner.junctionLaneIds
 
             responsePath = self.vehicleBasePathCaches[vehicleId]
-            waypointResponse = waypointSparseResults[vehicleId].copy()
+            if noncrossWaypoints is None or request.get('deviceType') != 'AGV':
+                waypointResponse = waypointSparseResults[vehicleId].copy()
+            else:
+                waypointResponse = noncrossWaypoints.get(vehicleId)
+                if waypointResponse is None:
+                    continue
             shortPathList, mergePathList = build_response_path_lists(
                 waypoints=waypointResponse,
                 planned_path=responsePath,
