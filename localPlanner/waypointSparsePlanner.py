@@ -59,11 +59,6 @@ def build_waypoint_sparse(
     _add_mandatory(
         mandatory, total, 0, WAYPOINT_CANDIDATE_PATH_END)
 
-    output_stop_s = _legal_output_s(
-        stop_s, current_s, junction_intervals)
-    if output_stop_s >= minimum_output_s - 1e-9:
-        _add_mandatory(mandatory, output_stop_s, 1, _MANDATORY_STOP)
-
     for entrance_s, exit_s in lane_change_intervals:
         effective_entrance_s = max(entrance_s, minimum_output_s)
         if effective_entrance_s < exit_s - 1e-6:
@@ -86,13 +81,20 @@ def build_waypoint_sparse(
             _add_mandatory(
                 mandatory, mandatory_s, priority, int(candidate_type))
 
+    output_stop_s = _legal_output_s(
+        stop_s, current_s, junction_intervals)
+    effective_stop_s = stop_s
+    if output_stop_s >= minimum_output_s - 1e-9:
+        effective_stop_s = min(
+            stop_s, _add_stop_mandatory(mandatory, output_stop_s))
+
     selected_s = _add_supplemental_points(
         mandatory, candidate_s, minimum_output_s)
     if len(selected_s) == 0:
         return _forward_stop(position, heading, forward_distance)
 
     rows = []
-    stop_relative_s = max(0.0, stop_s - current_s)
+    stop_relative_s = max(0.0, effective_stop_s - current_s)
     for path_s in selected_s:
         point = point_at_s(path, path_s)
         relative_s = max(0.0, path_s - current_s)
@@ -243,6 +245,27 @@ def _shift_junction_entrance_s(value, mandatory, minimum_output_s):
             previous_s + WAYPOINT_MANDATORY_MIN_FORWARD_SPACING,
         )
     return min(value, lower_bound)
+
+
+def _add_stop_mandatory(anchors, value):
+    """Attach a stop to an upstream mandatory point without moving it."""
+    upstream = [
+        (index, existing, priority, semantic)
+        for index, (existing, priority, semantic) in enumerate(anchors)
+        if existing <= value + 1e-9
+        and value - existing <= WAYPOINT_MANDATORY_MERGE_DISTANCE + 1e-9
+    ]
+    exits = [
+        anchor for anchor in upstream
+        if anchor[3] & WAYPOINT_CANDIDATE_JUNCTION_EXIT
+    ]
+    if upstream:
+        index, existing, priority, semantic = max(
+            exits or upstream, key=lambda anchor: anchor[1])
+        anchors[index] = (existing, min(priority, 1), semantic | _MANDATORY_STOP)
+        return existing
+    anchors.append((float(value), 1, _MANDATORY_STOP))
+    return float(value)
 
 
 def _legal_output_s(value, current_s, junction_intervals):
