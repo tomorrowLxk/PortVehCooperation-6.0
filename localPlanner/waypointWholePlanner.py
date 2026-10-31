@@ -593,7 +593,16 @@ def _prepare_speed_path(path, maximum_speed):
 
 def _prepare_spatial_geometry(path, path_s, candidate_s, static, dynamic):
     sample_s, left, right, starts, ends = _constraint_sample_layout(candidate_s)
-    centers, tangents = _path_states_at_s(path, path_s, sample_s)
+    stationary_tangent = None
+    # A one-point path at the measured position is current occupancy.
+    if (len(path) == 1 and np.linalg.norm(
+            path[0] - np.asarray(dynamic['position'], dtype=float)[:2])
+            <= 1e-3):
+        heading = float(dynamic['heading'])
+        stationary_tangent = np.asarray([
+            math.cos(heading), math.sin(heading)])
+    centers, tangents = _path_states_at_s(
+        path, path_s, sample_s, stationary_tangent)
     return {
         'path': path,
         'pathS': path_s,
@@ -653,11 +662,16 @@ def _constraint_sample_layout(candidate_s):
     )
 
 
-def _path_states_at_s(path, path_s, values):
+def _path_states_at_s(path, path_s, values, single_point_tangent=None):
     targets = np.clip(np.asarray(values, dtype=float), path_s[0], path_s[-1])
     if len(path) == 1:
         centers = np.repeat(path[:1], len(targets), axis=0)
-        tangents = np.tile(np.asarray([[1.0, 0.0]]), (len(targets), 1))
+        tangent = (
+            np.asarray(single_point_tangent, dtype=float)
+            if single_point_tangent is not None
+            else np.asarray([1.0, 0.0])
+        )
+        tangents = np.tile(tangent, (len(targets), 1))
         return centers, tangents
 
     indices = np.searchsorted(path_s, targets, side='right') - 1
@@ -688,7 +702,8 @@ def _truncate_spatial_geometry(geometry, end_s):
     normals = geometry['normals'][keep]
     if len(sample_s) == 0 or abs(sample_s[-1] - end_s) > 1e-9:
         end_center, end_tangent = _path_states_at_s(
-            geometry['path'], geometry['pathS'], [end_s])
+            geometry['path'], geometry['pathS'], [end_s],
+            geometry['tangents'][0])
         sample_s = np.r_[sample_s, end_s]
         centers = np.vstack((centers, end_center))
         tangents = np.vstack((tangents, end_tangent))
@@ -1216,7 +1231,8 @@ def _last_conflicting_positions(low_geometry, high_geometry, high_stopped):
         for _ in range(16):
             middle = 0.5 * (lower + upper)
             high_centers, high_tangents = _path_states_at_s(
-                high_geometry['path'], high_geometry['pathS'], middle)
+                high_geometry['path'], high_geometry['pathS'], middle,
+                high_geometry['tangents'][0])
             high_normals = np.column_stack((
                 -high_tangents[:, 1], high_tangents[:, 0]))
             overlaps = _overlap_pairs(
@@ -1301,9 +1317,11 @@ def _overlap_pairs(
 
 def _overlap_at_s(low_geometry, low_s, high_geometry, high_s, gap):
     low_center, low_tangent = _path_states_at_s(
-        low_geometry['path'], low_geometry['pathS'], [low_s])
+        low_geometry['path'], low_geometry['pathS'], [low_s],
+        low_geometry['tangents'][0])
     high_center, high_tangent = _path_states_at_s(
-        high_geometry['path'], high_geometry['pathS'], [high_s])
+        high_geometry['path'], high_geometry['pathS'], [high_s],
+        high_geometry['tangents'][0])
     low_normal = np.column_stack((-low_tangent[:, 1], low_tangent[:, 0]))
     high_normal = np.column_stack((-high_tangent[:, 1], high_tangent[:, 0]))
     return bool(_overlap_pairs(
