@@ -100,6 +100,7 @@ for stepIndex in range(maxSteps):
             vehicles[vehicleId].apply_response(
                 response,
                 planningEngine.vehicleBasePathCaches[vehicleId],
+                vehicles,
             )
         if PRINT_COOPERATION_BLOCKS:
             print('  cooperationBlocks (high -> low priority):')
