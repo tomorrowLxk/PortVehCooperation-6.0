@@ -251,6 +251,7 @@ class VehicleSimulator:
     def apply_response(self, response, future_path):
         waypointPoints = []
         intervalSpeeds = []
+        singlePointCommandSpeed = 0.0
         pathVoFirstPoints = []
         lastPathVoPoint = None
 
@@ -260,6 +261,7 @@ class VehicleSimulator:
             speed = max(0.0, float(segment.get('speedLimit') or 0.0))
             rawPoints = segment.get('points') or ()
             if rawPoints:
+                singlePointCommandSpeed = max(singlePointCommandSpeed, speed)
                 firstPoint = rawPoints[0]
                 pathVoFirstPoints.append(np.asarray(
                     [firstPoint['x'], firstPoint['y']], dtype=float))
@@ -309,7 +311,8 @@ class VehicleSimulator:
                 float(np.max(self.segmentSpeeds))
                 if len(self.segmentSpeeds) else 0.0
             )
-            approachSpeed = max(0.0, self.speed, previousSpeed)
+            approachSpeed = max(
+                0.0, self.speed, previousSpeed, singlePointCommandSpeed)
             if approachSpeed <= 1e-9:
                 self._stop_at_current_position()
                 return
