@@ -19,6 +19,7 @@ from parameters import (
     AGV_WAYPOINT_RESPONSE_REFRESH_DISTANCE,
     PATH_COLLISION_SAMPLE_SPACING,
     PATH_LATERAL_SAFETY_MARGIN,
+    OUTPUT_CROSS_CLEARANCE_M,
 )
 
 from localPlanner.cooperationBlocker import group_by_future_paths
@@ -66,10 +67,7 @@ from localPlanner.waypointSparsePlanner import (
 
 
 class PlanningEngine:
-    def __init__(self, *, if_cross=True, output_cross_clearance_m=6.0) -> None:
-        self.if_cross = bool(if_cross)
-        self.output_cross_clearance_m = max(
-            6.0, float(output_cross_clearance_m))
+    def __init__(self) -> None:
         # 长路径计算结果
         self.responses = None
         self.shortPathFailedVehicleIds = []
@@ -324,8 +322,8 @@ class PlanningEngine:
     def removeExitedVehicleCaches(self):
         """统一删除已连续缺失并从动静态缓存中移除的车辆全部历史状态。"""
         retainedVehicleIds = (
-            set(self.vehicleStaticInfoCaches)
-            & set(self.vehicleDynamicInfoCaches)
+                set(self.vehicleStaticInfoCaches)
+                & set(self.vehicleDynamicInfoCaches)
         )
         vehicleCaches = (
             self.drivableAreaPlannerCaches,
@@ -435,9 +433,9 @@ class PlanningEngine:
         responseMatch = project_to_polyline(
             waypointResponse[-1, :2], basePath)
         return (
-            responseMatch['distance'] > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
-            or responseMatch['s'] - currentMatch['s']
-            <= AGV_WAYPOINT_RESPONSE_REFRESH_DISTANCE
+                responseMatch['distance'] > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+                or responseMatch['s'] - currentMatch['s']
+                <= AGV_WAYPOINT_RESPONSE_REFRESH_DISTANCE
         )
 
     def updateVehicleObstacleCaches(
@@ -529,10 +527,10 @@ class PlanningEngine:
                     < VEHICLE_STOP_SPEED_THRESHOLD):
                 waypointWhole = effectiveWaypointWholeResults.get(vehicleId)
                 shouldMove = (
-                    waypointWhole is not None
-                    and len(waypointWhole.motionS) > 0
-                    and float(waypointWhole.motionS[-1])
-                    > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
+                        waypointWhole is not None
+                        and len(waypointWhole.motionS) > 0
+                        and float(waypointWhole.motionS[-1])
+                        > VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD
                 )
                 if shouldMove:
                     nearestDistance = float('inf')
@@ -586,6 +584,7 @@ class PlanningEngine:
         self.vehicleObstacleCaches = updated
 
     def batchRoutePlan(self, requests: List[Any]) -> List[Any]:
+        if_cross = True
         self.vehicleIdsNeedWaypointUpdate.clear()
         self.vehicleIdsMustDispatch.clear()
         self.vehicleIdsMustNotDispatch.clear()
@@ -627,7 +626,8 @@ class PlanningEngine:
         self.removeExitedVehicleCaches()
 
         # todo. 三、根据request更新临时信息
-        systemPriorities, vehiclePlanningMaxSpeeds = build_request_temporary_info(requests, self.vehicleStaticInfoCaches)
+        systemPriorities, vehiclePlanningMaxSpeeds = build_request_temporary_info(requests,
+                                                                                  self.vehicleStaticInfoCaches)
 
         # todo. 四、准备全部车辆的规划上下文
         for request_index, request in enumerate(requests):
@@ -699,15 +699,15 @@ class PlanningEngine:
                 polygons=vehi_obstacle_polygons,
                 previous_base_path=oldBasePath,
                 prefer_previous_path=(
-                    historyFinished
-                    and not vehicleDeviated
-                    and not historyBlocked
+                        historyFinished
+                        and not vehicleDeviated
+                        and not historyBlocked
                 ),
             )
             if not agv_spatial_result.success:
                 failureReason = (
-                    agv_spatial_result.failureReason
-                    or 'SPATIAL_PLANNING_FAILED'
+                        agv_spatial_result.failureReason
+                        or 'SPATIAL_PLANNING_FAILED'
                 )
                 mark_response_failure(
                     self.responses[request_index],
@@ -729,12 +729,12 @@ class PlanningEngine:
                     previousResponse = self.vehicleWaypointResponseCaches.get(
                         vehicleId)
                     responseCoversEnd = (
-                        previousResponse is not None
-                        and len(previousResponse) > 0
-                        and np.linalg.norm(
-                            previousResponse[-1, :2]
-                            - selectedBasePath[-1, :2]
-                        ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+                            previousResponse is not None
+                            and len(previousResponse) > 0
+                            and np.linalg.norm(
+                        previousResponse[-1, :2]
+                        - selectedBasePath[-1, :2]
+                    ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
                     )
                     if (endpointDistance
                             > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
@@ -772,7 +772,7 @@ class PlanningEngine:
                         final_destination=(
                             self.vehicleRouteCaches[vehicleId][-1]
                             if vehicleId in self.vehicleRouteCaches
-                            and len(self.vehicleRouteCaches[vehicleId])
+                               and len(self.vehicleRouteCaches[vehicleId])
                             else None
                         ),
                         base_path_lane_ids=(
@@ -1008,7 +1008,7 @@ class PlanningEngine:
         allResponses = self.responses
         finalResponses = []
         noncrossWaypoints = None
-        if not self.if_cross:
+        if not if_cross:
             candidatesToIssue = {
                 str(request.get('deviceId')): waypointSparseResults[
                     str(request.get('deviceId'))]
@@ -1019,10 +1019,10 @@ class PlanningEngine:
                     not in self.finalDestinationVehicleIds
                     and request.get('deviceType') == 'AGV'
                     and not is_current_position_stop(
-                        effectiveWaypointWholeResults[
-                            str(request.get('deviceId'))],
-                        self.vehicleDynamicInfoCaches[
-                            str(request.get('deviceId'))]))
+                            effectiveWaypointWholeResults[
+                                str(request.get('deviceId'))],
+                            self.vehicleDynamicInfoCaches[
+                                str(request.get('deviceId'))]))
             }
             noncrossWaypoints = select_noncrossing_responses(
                 candidate_waypoints=candidatesToIssue,
@@ -1030,7 +1030,7 @@ class PlanningEngine:
                 cached_responses=self.vehicleWaypointResponseCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
                 vehicle_static_info=self.vehicleStaticInfoCaches,
-                stop_clearance=self.output_cross_clearance_m,
+                stop_clearance=OUTPUT_CROSS_CLEARANCE_M,
             )
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))

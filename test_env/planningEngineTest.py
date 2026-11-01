@@ -18,6 +18,7 @@ from parameters import (
     AGV_WAYPOINT_RESPONSE_REFRESH_DISTANCE,
     PATH_COLLISION_SAMPLE_SPACING,
     PATH_LATERAL_SAFETY_MARGIN,
+    OUTPUT_CROSS_CLEARANCE_M,
 )
 
 from localPlanner.cooperationBlocker import group_by_future_paths
@@ -65,11 +66,7 @@ from localPlanner.waypointSparsePlanner import (
 
 
 class PlanningEngine:
-    def __init__(self, centerlineDict, connectorDict, mapVersion,
-                 *, if_cross=True, output_cross_clearance_m=6.0) -> None:
-        self.if_cross = bool(if_cross)
-        self.output_cross_clearance_m = max(
-            6.0, float(output_cross_clearance_m))
+    def __init__(self, centerlineDict, connectorDict, mapVersion) -> None:
         # 测试版全部地图数据由场景JSON加载后从外部传入。
         self.centerline_dict = centerlineDict
         self.connector_dict = connectorDict
@@ -597,6 +594,7 @@ class PlanningEngine:
             allVehicleStaticInfo, centerlineDict, connectorDict, mapVersion,
             junctionLaneIds, obstacleMap, laneSignal_zy, longRouteResult
     ) -> List[Any]:
+        if_cross = True
         self.vehicleIdsNeedWaypointUpdate.clear()
         self.vehicleIdsMustDispatch.clear()
         self.vehicleIdsMustNotDispatch.clear()
@@ -1036,7 +1034,7 @@ class PlanningEngine:
         allResponses = self.responses
         finalResponses = []
         noncrossWaypoints = None
-        if not self.if_cross:
+        if not if_cross:
             candidatesToIssue = {
                 str(request.get('deviceId')): waypointSparseResults[
                     str(request.get('deviceId'))]
@@ -1058,7 +1056,7 @@ class PlanningEngine:
                 cached_responses=self.vehicleWaypointResponseCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
                 vehicle_static_info=self.vehicleStaticInfoCaches,
-                stop_clearance=self.output_cross_clearance_m,
+                stop_clearance=OUTPUT_CROSS_CLEARANCE_M,
             )
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
