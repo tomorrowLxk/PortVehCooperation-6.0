@@ -12,6 +12,7 @@ from parameters import (
     VEHICLE_OBSTACLE_MAX_FRAMES,
     VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD,
     VEHICLE_STOP_SPEED_THRESHOLD,
+    HV_FUTURE_PATH_STOP_CONFIRM_FRAMES,
     AGV_BASE_PATH_DEVIATION_THRESHOLD,
     AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD,
     AGV_BASE_PATH_REPLAN_WAYPOINT_DISTANCE,
@@ -114,6 +115,8 @@ class PlanningEngine:
         self.vehicleDynamicInfoCaches: Dict[str, Any] = {}
         # 每辆车是否应作为静态障碍物处理，以及“应走但未走”的连续帧数。
         self.vehicleObstacleCaches: Dict[str, Any] = {}
+        # 人驾车连续低速帧数；仅用于本帧futurePath，不改变完整basePath。
+        self.hvLowSpeedFrameCaches: Dict[str, int] = {}
 
         # reversePointCaches以车辆ID为key，只保存当前调箱门任务的倒车切换点xy。
         self.reversePointCaches: Dict[str, Any] = {}
@@ -344,6 +347,7 @@ class PlanningEngine:
             self.vehicleWaypointResponseCaches,
             self.vehicleDispatchedPathVOCaches,
             self.vehicleObstacleCaches,
+            self.hvLowSpeedFrameCaches,
             self.reversePointCaches,
             self.vehicleTaskCaches,
             self.vehicleRouteProgressCaches,
@@ -828,6 +832,7 @@ class PlanningEngine:
         # todo. 六、根据vehicleBasePathCaches生成全部BSM车辆的futurePath
         future_path = {}
         futureWaypointCandidates = {}
+        lowSpeedFrames = {}
         for rawVehicleId in allVehicleStates:
             vehicleId = str(rawVehicleId)
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
@@ -870,6 +875,15 @@ class PlanningEngine:
                 lane_signals=laneSignal_zy,
                 base_path_lane_ids=basePathLaneIds,
             )
+            if (staticInfo.get('vehicleType') != 'AGV'
+                    and dynamicInfo['speed'] < VEHICLE_STOP_SPEED_THRESHOLD):
+                frames = self.hvLowSpeedFrameCaches.get(vehicleId, 0) + 1
+                lowSpeedFrames[vehicleId] = frames
+                if frames >= HV_FUTURE_PATH_STOP_CONFIRM_FRAMES:
+                    position = np.asarray(dynamicInfo['position'], dtype=float)[:2]
+                    future_path[vehicleId] = np.asarray([[
+                        position[0], position[1], 0.0,
+                    ]], dtype=float)
             baseWaypointCandidates = self.vehicleBaseWaypointCandidateCaches[vehicleId]
             futureWaypointCandidates[vehicleId] = (
                 build_future_waypoint_candidates(
@@ -879,6 +893,8 @@ class PlanningEngine:
                     current_position=dynamicInfo['position'],
                 )
             )
+
+        self.hvLowSpeedFrameCaches = lowSpeedFrames
 
         # todo 八、仅根据futurePath的空间接近关系生成协同连通块，保留单车块。
         cooperationBlocks = group_by_future_paths(

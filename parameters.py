@@ -7,6 +7,7 @@ VEHICLE_LONGITUDINAL_UNCERTAINTY_SCALE = 0.0  # 每级posAccuracy对应的纵向
 VEHICLE_OBSTACLE_CONFIRM_FRAMES = 8  # 每1s规划一次时，车辆连续“短路径要求行驶但实际静止”达到8s后视为静态障碍物
 VEHICLE_OBSTACLE_MAX_FRAMES = 300  # 死车原因连续帧数的最大缓存值
 VEHICLE_STOP_SPEED_THRESHOLD = 0.5  # 车辆速度低于该值时，开始怀疑车辆处于停车状态，单位m/s
+HV_FUTURE_PATH_STOP_CONFIRM_FRAMES = 2  # 人驾车连续低速达到该帧数后，仅预测当前位置占用
 VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD = 2.0  # 短路径剩余长度超过该值时，才认为车辆仍应继续行驶，单位m
 AGV_DESTINATION_REMAINING_LENGTH_THRESHOLD = 2.0  # AGV沿长路径到终点的剩余弧长不超过该值时，视为终点死车，单位m
 HV_DESTINATION_DISTANCE_THRESHOLD = 2.0  # HV当前位置到长路径终点的平面距离不超过该值时，视为终点死车，单位m
