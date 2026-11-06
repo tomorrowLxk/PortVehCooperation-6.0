@@ -241,6 +241,16 @@ class PlanningEngine:
 
         # route只比较点数；确认需要重建上下文后再转换完整坐标，避免正常帧重复复制。
         sourceRoute = np.array(route, dtype=float, copy=True)[:, :2]
+        resumeRouteS = (
+            planner.lastRouteS
+            if planner is not None
+            and not taskChanged
+            and not allowReverse
+            and cachedLaneIds == sourceLaneIds
+            and cachedRoute is not None
+            and np.array_equal(cachedRoute, sourceRoute)
+            else None
+        )
 
         # 任务/地图/长路径变化后，所有依赖旧任务的规划结果立即失效。
         if taskChanged:
@@ -303,6 +313,7 @@ class PlanningEngine:
                     forbiddenLaneIds=forbiddenLaneIds,
                     mapVersion=mapVersion,
                     junctionLaneIds=junctionLaneIds,
+                    resume_route_s=resumeRouteS,
                 )
             except Exception as error:
                 self.drivableAreaPlannerCaches.pop(vehicleId, None)

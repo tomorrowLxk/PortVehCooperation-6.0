@@ -109,7 +109,7 @@ class DrivableAreaPlanner:
                                referLaneIds, referLine,
                                dynamicInfo, reversePoint=None,
                                forbiddenLaneIds=None, mapVersion=None,
-                               junctionLaneIds=None):
+                               junctionLaneIds=None, resume_route_s=None):
         """使用新的地图和长路径重建任务级完整可行域。"""
         lane_ids = list(referLaneIds)
         route = np.asarray(referLine, dtype=float)[:, :2].copy()
@@ -216,12 +216,12 @@ class DrivableAreaPlanner:
         self.is_dxm_update_protected = False
         self.lastLaneId = None
         self.lastLaneS = None
-        self.lastRouteS = None
+        self.lastRouteS = resume_route_s
         self.lastRouteStageIndex = None
         self.reverseStageIndex = self._find_reverse_stage(reversePoint)
         self.passedReversePoint = False
         self._update_position_match(
-            dynamicInfo, reversePoint, initial=True
+            dynamicInfo, reversePoint, initial=resume_route_s is None
         )
 
     @staticmethod
@@ -449,6 +449,13 @@ class DrivableAreaPlanner:
 
     def _position_match_candidates(self):
         if self.lastLaneId is None:
+            if self.lastRouteS is not None:
+                return {
+                    lane
+                    for index, stage in enumerate(self.routeStages)
+                    if self.routeStageBounds[index][1] >= self.lastRouteS - 1e-6
+                    for lane in stage
+                }
             return {self.referLaneIds[0]}
 
         candidates = {self.lastLaneId}
@@ -557,7 +564,11 @@ class DrivableAreaPlanner:
 
             occurrences = (
                 index for index in self.laneStageIndices[lane]
-                if index >= self.lastRouteStageIndex
+                if (self.lastRouteStageIndex is not None
+                    and index >= self.lastRouteStageIndex)
+                or (self.lastRouteStageIndex is None
+                    and self.lastRouteS is not None
+                    and self.routeStageBounds[index][1] >= self.lastRouteS - 1e-6)
             )
             for stage_index in occurrences:
                 if (self.reverseStageIndex is not None
