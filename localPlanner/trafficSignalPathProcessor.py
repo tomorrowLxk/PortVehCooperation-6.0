@@ -38,7 +38,7 @@ def build_future_path(
         base_path, current_position, current_speed,
         max_acceleration, max_deceleration,
         centerline_dict, connector_dict, lane_signals,
-        base_path_lane_ids=None):
+        base_path_lane_ids=None, junction_lane_ids=None):
     """裁剪已驶过部分、处理第一个信控并生成最终速度包络。"""
     path, point_lane_ids = _trim_passed_path(
         base_path,
@@ -52,6 +52,7 @@ def build_future_path(
             connector_dict,
             lane_signals,
             point_lane_ids,
+            junction_lane_ids,
         )
         if signal is not None:
             stop_s, state = signal
@@ -110,7 +111,7 @@ def _signal_time(state):
 
 def _first_signal(
         path, centerline_dict, connector_dict, lane_signals,
-        point_lane_ids=None):
+        point_lane_ids=None, junction_lane_ids=None):
     """按path行驶顺序返回第一个信控的停车弧长和方向状态。"""
     path_xy = clean_xy(path)
     point_lanes = (
@@ -132,13 +133,53 @@ def _first_signal(
             candidates.append((int(indices[matched[0]]), lane_id, centerline))
 
     if candidates:
-        _, lane_id, centerline = min(candidates, key=lambda item: item[0])
+        point_index, lane_id, centerline = min(
+            candidates, key=lambda item: item[0])
         signal_s = project_to_polyline(centerline[-1], path_xy)['s']
-        direction = _movement_direction(path_xy, signal_s)
+        direction = _junction_movement_direction(
+            point_lanes, point_index, lane_id, centerline,
+            centerline_dict, junction_lane_ids,
+        )
+        if direction is None:
+            direction = _movement_direction(path_xy, signal_s)
         state = lane_signals[lane_id].get(direction)
         if state is None:
             return None
         return max(0.0, signal_s - TRAFFIC_SIGNAL_STOP_DISTANCE), state
+    return None
+
+
+def _junction_movement_direction(
+        point_lanes, point_index, incoming_lane_id, incoming_centerline,
+        centerline_dict, junction_lane_ids):
+    "按本次路径所经虚拟车道的完整转向判断信控方向。"
+    if junction_lane_ids is None:
+        return None
+    junction_lanes = junction_lane_ids
+    if not isinstance(junction_lanes, (set, frozenset)):
+        junction_lanes = set(junction_lanes)
+    for lane_id in point_lanes[point_index + 1:]:
+        if lane_id is None or lane_id == incoming_lane_id:
+            continue
+        if lane_id not in junction_lanes:
+            return None
+        virtual_line = centerline_dict.get(lane_id)
+        if virtual_line is None:
+            return None
+        virtual_xy = clean_xy(virtual_line)
+        if len(virtual_xy) < 2:
+            return None
+        delta = _normalize_angle(
+            heading_at_s(virtual_xy, polyline_length(virtual_xy))
+            - heading_at_s(incoming_centerline,
+                           polyline_length(incoming_centerline)))
+        if abs(delta) >= math.radians(TRAFFIC_SIGNAL_UTURN_THRESHOLD_DEG):
+            return U_TURN
+        if delta > math.radians(TRAFFIC_SIGNAL_TURN_THRESHOLD_DEG):
+            return LEFT_TURN
+        if delta < -math.radians(TRAFFIC_SIGNAL_TURN_THRESHOLD_DEG):
+            return RIGHT_TURN
+        return STRAIGHT
     return None
 
 

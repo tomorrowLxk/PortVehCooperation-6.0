@@ -868,11 +868,16 @@ class PlanningEngine:
                     planner.connector_dict if planner is not None
                     else ConnectorDict
                 )
+                signalJunctionLaneIds = (
+                    planner.junctionLaneIds if planner is not None
+                    else junctionLaneIds
+                )
                 basePathLaneIds = self.vehicleBasePathLaneIDCaches.get(
                     vehicleId)
             else:
                 signalCenterlines = CenterlineDict
                 signalConnectors = ConnectorDict
+                signalJunctionLaneIds = junctionLaneIds
                 basePathLaneIds = None
 
             future_path[vehicleId] = build_future_path(
@@ -885,6 +890,7 @@ class PlanningEngine:
                 connector_dict=signalConnectors,
                 lane_signals=laneSignal_zy,
                 base_path_lane_ids=basePathLaneIds,
+                junction_lane_ids=signalJunctionLaneIds,
             )
             if (staticInfo.get('vehicleType') != 'AGV'
                     and dynamicInfo['speed'] < VEHICLE_STOP_SPEED_THRESHOLD):
