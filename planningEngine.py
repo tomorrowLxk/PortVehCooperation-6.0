@@ -749,7 +749,7 @@ class PlanningEngine:
                             and np.linalg.norm(
                         previousResponse[-1, :2]
                         - selectedBasePath[-1, :2]
-                    ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+                    ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD + 1e-2
                     )
                     if (endpointDistance
                             > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD

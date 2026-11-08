@@ -402,27 +402,64 @@ class VehicleSimulator:
             self.speed = 0.0
         self.history.append(np.asarray([self.x, self.y], dtype=float))
 
+def normalize_lane_signals(lane_signals):
+    # Legacy laneId -> direction -> state dictionaries remain supported.
+    if not lane_signals:
+        return {}
+    if isinstance(lane_signals, dict):
+        return lane_signals
+    if not isinstance(lane_signals, list):
+        raise ValueError('laneSignals must be a dictionary or a list of cycles')
+
+    directions = {
+        'straight': 'straight', 'left': 'leftTurn',
+        'leftturn': 'leftTurn', 'left_turn': 'leftTurn',
+        'right': 'rightTurn', 'rightturn': 'rightTurn',
+        'right_turn': 'rightTurn', 'uturn': 'UTurn',
+        'u_turn': 'UTurn', 'u-turn': 'UTurn',
+    }
+    states = {}
+    for item in lane_signals:
+        if not isinstance(item, dict):
+            raise ValueError('Each lane signal cycle must be an object')
+        lane_id = str(item.get('laneId', '')).strip()
+        direction = directions.get(str(item.get('direction', '')).lower())
+        period = float(item.get('periodSeconds', 0.0))
+        if not lane_id or direction is None or not math.isfinite(period) or period <= 0:
+            raise ValueError(f'Invalid lane signal cycle: {item!r}')
+        movements = states.setdefault(lane_id, {})
+        if direction in movements:
+            raise ValueError(f'Duplicate lane signal: {lane_id} / {direction}')
+        movements[direction] = {
+            'color': 'GREEN', 'time': period,
+            'greenDuration': period, 'redDuration': period,
+        }
+    return states
+
+
 class SignalController:
     """维护JSON给出的信号灯颜色和倒计时。"""
 
     def __init__(self, lane_signals):
-        self.states = deepcopy(lane_signals)
+        self.states = deepcopy(normalize_lane_signals(lane_signals))
 
     def step(self, dt):
         for movements in self.states.values():
             for state in movements.values():
-                remaining = max(0.0, float(state.get('time', 0.0)) - dt)
-                if remaining > 0.0:
-                    state['time'] = remaining
+                if state.get('time') is None:
                     continue
-                color = str(state.get('color', 'GREEN'))
-                next_color = 'GREEN' if color == 'RED' else 'RED'
-                state['color'] = next_color
-                duration_key = (
-                    'greenDuration' if next_color == 'GREEN'
-                    else 'redDuration'
-                )
-                state['time'] = float(state.get(duration_key, 30.0))
+                remaining = float(state['time']) - dt
+                while remaining <= 1e-9:
+                    color = str(state.get('color', 'GREEN'))
+                    next_color = 'GREEN' if color == 'RED' else 'RED'
+                    state['color'] = next_color
+                    duration_key = (
+                        'greenDuration' if next_color == 'GREEN'
+                        else 'redDuration'
+                    )
+                    duration = float(state.get(duration_key, 30.0))
+                    remaining += duration if duration > 0.0 else 30.0
+                state['time'] = remaining
 
 
 class SimulationVisualizer:
@@ -504,15 +541,7 @@ class SimulationVisualizer:
             route = np.asarray(route_data['points'], dtype=float)
             axes.plot(route[:, 0], route[:, 1], color='black',
                       linewidth=0.45, alpha=0.95, zorder=11)
-        for lane_id, movements in signals.items():
-            if lane_id not in self.scenario.centerlineDict:
-                continue
-            point = self.scenario.centerlineDict[lane_id][-1]
-            color = ('red' if any(
-                state.get('color') == 'RED'
-                for state in movements.values()) else 'green')
-            axes.scatter(point[0], point[1], s=45, c=color,
-                         edgecolors='white', zorder=8)
+        self._draw_red_signals(axes, signals)
 
         status_lines = []
         response_map = {
@@ -545,6 +574,43 @@ class SimulationVisualizer:
             bbox={'boxstyle': 'round', 'facecolor': 'white', 'alpha': 0.8})
         self.figure.canvas.draw_idle()
         self.plt.pause(0.001)
+
+    def _draw_red_signals(self, axes, signals):
+        for lane_id, movements in signals.items():
+            line = self.scenario.centerlineDict.get(lane_id)
+            if line is None or not isinstance(movements, dict):
+                continue
+            line = np.asarray(line, dtype=float)[:, :2]
+            if len(line) < 2:
+                continue
+            segments = np.diff(line, axis=0)
+            valid = np.flatnonzero(np.linalg.norm(segments, axis=1) > 1e-6)
+            if len(valid) == 0:
+                continue
+            tangent = segments[valid[-1]] / np.linalg.norm(segments[valid[-1]])
+            left = np.asarray([-tangent[1], tangent[0]])
+            directions = {
+                'straight': tangent, 'leftTurn': left,
+                'rightTurn': -left, 'UTurn': -tangent,
+            }
+            offsets = {'straight': 0.0, 'leftTurn': 1.5,
+                       'rightTurn': -1.5, 'UTurn': 0.0}
+            for direction, state in movements.items():
+                if (direction not in directions or not isinstance(state, dict)
+                        or str(state.get('color', '')).upper() != 'RED'):
+                    continue
+                tail = line[-1] - 4.0 * tangent + offsets[direction] * left
+                tip = tail + 4.0 * directions[direction]
+                axes.annotate('', xy=tip, xytext=tail,
+                              arrowprops={'arrowstyle': '-|>', 'color': 'red',
+                                          'lw': 1.7, 'mutation_scale': 14},
+                              zorder=13)
+                remaining = state.get('time')
+                if remaining is not None and math.isfinite(float(remaining)):
+                    axes.text(tip[0], tip[1], f'{math.ceil(float(remaining))}s',
+                              color='darkred', fontsize=7, zorder=14,
+                              bbox={'facecolor': 'white', 'alpha': 0.8,
+                                    'edgecolor': 'none', 'pad': 1})
 
     def _show_complete_drivable_areas(self, engine):
         if (self.completeAreaShown

@@ -64,6 +64,7 @@ from localPlanner.waypointSparsePlanner import (
     build_hv_waypoint_sparse,
     build_waypoint_sparse,
 )
+from test_env.simulation import normalize_lane_signals
 
 
 class PlanningEngine:
@@ -609,6 +610,7 @@ class PlanningEngine:
             allVehicleStaticInfo, centerlineDict, connectorDict, mapVersion,
             junctionLaneIds, obstacleMap, laneSignal_zy, longRouteResult
     ) -> List[Any]:
+        laneSignal_zy = normalize_lane_signals(laneSignal_zy)
         if_cross = True
         self.vehicleIdsNeedWaypointUpdate.clear()
         self.vehicleIdsMustDispatch.clear()
@@ -749,7 +751,7 @@ class PlanningEngine:
                         and np.linalg.norm(
                             previousResponse[-1, :2]
                             - selectedBasePath[-1, :2]
-                        ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD
+                        ) <= AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD + 1e-2
                     )
                     if (endpointDistance
                             > AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD

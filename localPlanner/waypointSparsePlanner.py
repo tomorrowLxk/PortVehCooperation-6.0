@@ -48,6 +48,8 @@ def build_waypoint_sparse(
     stop_s = float(project_to_polyline(
         waypoint_whole.points[-1], path)['s'])
     stop_s = float(np.clip(stop_s, current_s, total))
+    if total - stop_s <= 1e-2:
+        stop_s = total
     candidate_s, candidate_types = _candidate_data(
         base_candidates, path, total)
     junction_intervals = _candidate_junction_intervals(
