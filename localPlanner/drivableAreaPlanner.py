@@ -1095,50 +1095,53 @@ class DrivableAreaPlanner:
                 target_stage_index = index
                 break
 
-        # If extending beyond one junction reaches another junction, continue
-        # through the latter as well. This keeps the final junction exit and
-        # its short downstream section in the same planning horizon.
-        for _ in range(len(self.routeStageBounds)):
-            terminal_junction_stage = None
-            for index in range(current_stage_index,
-                               target_stage_index + 1):
-                if not any(
-                        lane in self.junctionLaneIds
-                        for lane in self.routeStageReferenceLaneIds[index]):
-                    continue
-                junction_exit_route_s = self.routeStageBounds[index][1]
-                if (target_route_s
-                        <= junction_exit_route_s
-                        + JUNCTION_EXIT_PATH_EXTENSION + 1e-6):
-                    terminal_junction_stage = index
-            if terminal_junction_stage is None:
-                break
+        # Extend only the junction reached by the original planning horizon.
+        # The extension itself must not trigger another junction extension.
+        terminal_junction_stage = None
+        for index in range(current_stage_index, target_stage_index + 1):
+            if not any(
+                    lane in self.junctionLaneIds
+                    for lane in self.routeStageReferenceLaneIds[index]):
+                continue
+            junction_exit_route_s = self.routeStageBounds[index][1]
+            if (target_route_s
+                    <= junction_exit_route_s
+                    + JUNCTION_EXIT_PATH_EXTENSION + 1e-6):
+                terminal_junction_stage = index
 
+        if terminal_junction_stage is not None:
             junction_exit_route_s = self.routeStageBounds[
                 terminal_junction_stage
             ][1]
             remaining_after_exit = phase_end_s - junction_exit_route_s
-            if remaining_after_exit <= 1e-6:
-                break
-            if (remaining_after_exit
+            if (0.0 < remaining_after_exit
                     <= JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE):
                 next_target_route_s = phase_end_s
             else:
-                next_target_route_s = min(
-                    junction_exit_route_s + JUNCTION_EXIT_PATH_EXTENSION,
-                    phase_end_s,
-                )
-            if next_target_route_s <= target_route_s + 1e-6:
-                break
+                exit_road_stage = terminal_junction_stage + 1
+                if (exit_road_stage < len(self.routeStageBounds)
+                        and not any(
+                            lane in self.junctionLaneIds
+                            for lane in self.routeStageReferenceLaneIds[
+                                exit_road_stage
+                            ])):
+                    next_target_route_s = min(
+                        junction_exit_route_s + JUNCTION_EXIT_PATH_EXTENSION,
+                        self.routeStageBounds[exit_road_stage][1],
+                        phase_end_s,
+                    )
+                else:
+                    next_target_route_s = target_route_s
 
-            target_route_s = next_target_route_s
-            target_stage_index = len(self.routeStageBounds) - 1
-            for index in range(terminal_junction_stage,
-                               len(self.routeStageBounds)):
-                if (target_route_s
-                        <= self.routeStageBounds[index][1] + 1e-6):
-                    target_stage_index = index
-                    break
+            if next_target_route_s > target_route_s + 1e-6:
+                target_route_s = next_target_route_s
+                target_stage_index = len(self.routeStageBounds) - 1
+                for index in range(terminal_junction_stage,
+                                   len(self.routeStageBounds)):
+                    if (target_route_s
+                            <= self.routeStageBounds[index][1] + 1e-6):
+                        target_stage_index = index
+                        break
         if (reverse_point is not None
                 and not self.passedReversePoint
                 and abs(target_route_s - phase_end_s) <= 1e-6):
