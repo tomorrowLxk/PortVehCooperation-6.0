@@ -848,7 +848,7 @@ def _build_graph(
                      or destination.referenceS <= reference_metric.project(
                          line_metrics[current_line].values_at(
                              [current_junction_end_s])[0][0]
-                     )["s"] + 1e-6)):
+                     )["s"] + 1e-2)):
             terminal_sources.insert(0, "S")
         for source_id in terminal_sources:
             source = nodes[source_id]
