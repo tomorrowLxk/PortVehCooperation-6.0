@@ -80,6 +80,15 @@ def build_waypoint_sparse(
             if _is_shiftable_junction_entrance(candidate_type):
                 mandatory_s = _shift_junction_entrance_s(
                     path_s, mandatory, minimum_output_s)
+                # Do not shift a junction entrance upstream of a lane-change
+                # exit. Coincident boundaries stay at their shared position.
+                for _, lane_change_exit_s in lane_change_intervals:
+                    if (minimum_output_s <= lane_change_exit_s <= path_s
+                            and path_s - lane_change_exit_s
+                            <= WAYPOINT_JUNCTION_ENTRANCE_UPSTREAM_OFFSET + 1e-9
+                            and mandatory_s <= lane_change_exit_s
+                            + WAYPOINT_MANDATORY_MIN_FORWARD_SPACING + 1e-9):
+                        mandatory_s = lane_change_exit_s
             _add_mandatory(
                 mandatory, mandatory_s, priority, int(candidate_type))
 
