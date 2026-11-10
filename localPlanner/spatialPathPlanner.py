@@ -139,6 +139,7 @@ class _Graph:
     stops: list[str]
     primaryLine: int | None
     currentLine: int
+    junctionIntervals: tuple[tuple[tuple[float, float], ...], ...]
 
 
 @dataclass
@@ -878,7 +879,11 @@ def _build_graph(
     graph = _Graph(
         lines, line_metrics, reference_metric, cross_metric,
         nodes, edges, adjacency, goals, stops,
-        primary_line, current_line)
+        primary_line, current_line,
+        tuple(tuple(
+            (float(segment.startS), float(segment.endS))
+            for segment in segments if segment.isJunction
+        ) for segments in line_lane_segments))
     if current_junction_end_s is None:
         _prefer_safe_continuation_edge(
             graph, edge_keys, continuation_path,
@@ -1237,7 +1242,9 @@ def _strict_candidates(
                 previous_state = edge.state
                 _validate_edge(
                     graph, edge, polygons, static_info, dynamic_info)
-                if edge.state in ("COLLISION_INVALID", "CURVATURE_INVALID"):
+                if edge.state in (
+                        "COLLISION_INVALID", "CURVATURE_INVALID",
+                        "JUNCTION_CROSS_INVALID"):
                     edge_invalid = True
                     if previous_state == "UNKNOWN":
                         changed = True
@@ -1351,7 +1358,9 @@ def _search(graph, target_id, collision_pairs, curvature_pairs):
             continue
         for edge_id in graph.adjacency.get(node_id, ()):
             edge = graph.edges[edge_id]
-            if edge.state in ("COLLISION_INVALID", "CURVATURE_INVALID"):
+            if edge.state in (
+                    "COLLISION_INVALID", "CURVATURE_INVALID",
+                    "JUNCTION_CROSS_INVALID"):
                 continue
             pair = (previous_edge, edge_id)
             is_lane_change = _is_lane_change_edge(graph, edge)
@@ -1458,6 +1467,9 @@ def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
             return
         cross_s = (start_s, end_s)
     _materialize_edge(graph, edge, dynamic_info, cross_s)
+    if edge.kind == "CROSS" and _cross_edge_spans_junction(graph, edge):
+        edge.state = "JUNCTION_CROSS_INVALID"
+        return
     if path_vehicle_intersects(
             edge.geometry, polygons,
             static_info["length"], static_info["width"],
@@ -1480,6 +1492,39 @@ def _validate_edge(graph, edge, polygons, static_info, dynamic_info):
         "VALID" if maximum <= limit + 1e-9
         else "CURVATURE_INVALID"
     )
+
+
+def _cross_edge_spans_junction(graph, edge):
+    if edge.sourceLine is None:
+        return False
+    source_intervals = graph.junctionIntervals[edge.sourceLine]
+    target_intervals = graph.junctionIntervals[edge.targetLine]
+    if not source_intervals or not target_intervals:
+        return False
+    source = graph.nodes[edge.source]
+    target = graph.nodes[edge.target]
+    source_metric = graph.lineMetrics[edge.sourceLine]
+    target_metric = graph.lineMetrics[edge.targetLine]
+    source_s = source.lineS.get(edge.sourceLine)
+    if source_s is None:
+        source_s = source_metric.project(source.point)["s"]
+    target_s = target.lineS.get(edge.targetLine)
+    if target_s is None:
+        target_s = target_metric.project(target.point)["s"]
+    for source_start_s, source_end_s in source_intervals:
+        if source_s > source_start_s + 1e-2:
+            continue
+        source_bounds, _ = source_metric.values_at((source_start_s, source_end_s))
+        source_ref_s = graph.referenceMetric.project_many(source_bounds)["s"]
+        for target_start_s, target_end_s in target_intervals:
+            if target_s < target_end_s - 1e-2:
+                continue
+            target_bounds, _ = target_metric.values_at((target_start_s, target_end_s))
+            target_ref_s = graph.referenceMetric.project_many(target_bounds)["s"]
+            if (min(source_ref_s[1], target_ref_s[1])
+                    > max(source_ref_s[0], target_ref_s[0]) + 1e-6):
+                return True
+    return False
 
 
 def _materialize_edge(graph, edge, dynamic_info=None, cross_s=None):
