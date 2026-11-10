@@ -12,6 +12,8 @@ from parameters import (
     VEHICLE_OBSTACLE_MAX_FRAMES,
     VEHICLE_PATH_REMAINING_LENGTH_THRESHOLD,
     VEHICLE_STOP_SPEED_THRESHOLD,
+    VEHICLE_DEAD_ACTUAL_SPEED_THRESHOLD,
+    VEHICLE_DEAD_DISPATCH_SPEED_THRESHOLD,
     HV_FUTURE_PATH_STOP_CONFIRM_FRAMES,
     AGV_BASE_PATH_DEVIATION_THRESHOLD,
     AGV_BASE_PATH_ENDPOINT_SAME_THRESHOLD,
@@ -546,7 +548,7 @@ class PlanningEngine:
             # 3. 前面均未命中时，仅AGV根据实际采用的速度规划结果判断其他死车。
             if (reason is None and isAgv
                     and float(dynamicInfo.get('speed', 0.0))
-                    < VEHICLE_STOP_SPEED_THRESHOLD):
+                    < VEHICLE_DEAD_ACTUAL_SPEED_THRESHOLD):
                 waypointWhole = effectiveWaypointWholeResults.get(vehicleId)
                 shouldMove = (
                     waypointWhole is not None
@@ -575,7 +577,9 @@ class PlanningEngine:
                         if distance <= nearestDistance:
                             nearestDistance = distance
                             nearestSpeed = segmentSpeed
-                    shouldMove = nearestSpeed > 1e-9
+                    shouldMove = (
+                        nearestSpeed > VEHICLE_DEAD_DISPATCH_SPEED_THRESHOLD
+                    )
                 if shouldMove:
                     reason = '其他'
 
