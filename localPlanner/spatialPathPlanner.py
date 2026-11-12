@@ -18,8 +18,10 @@ from localPlanner.pathGeometry import (
     clean_xy,
     frenet_connector,
     path_curvatures,
+    project_to_polyline,
     project_points_to_polyline,
     resample_polyline,
+    slice_polyline,
     truncate_polyline,
 )
 from parameters import (
@@ -140,6 +142,7 @@ class _Graph:
     primaryLine: int | None
     currentLine: int
     junctionIntervals: tuple[tuple[tuple[float, float], ...], ...]
+    historyJunctionExit: np.ndarray | None = None
 
 
 @dataclass
@@ -318,7 +321,7 @@ def plan_spatial_path(
         polygons, vehicle_static_info, vehicle_dynamic_info,
         reverse_point=None, stop_at_route_end=False,
         continuation_path=None, destination_lane_id=None,
-        current_lane_id=None):
+        current_lane_id=None, history_junction_match=False):
     current = np.asarray(current_position, dtype=float)[:2]
     reference = clean_xy(reference_line)
     if (stop_at_route_end and len(reference) == 1
@@ -346,7 +349,7 @@ def plan_spatial_path(
         current, float(current_heading), reference, polygons,
         vehicle_static_info, vehicle_dynamic_info, reverse_point,
         continuation_path, stop_at_route_end, destination_lane_id,
-        current_lane_id,
+        current_lane_id, history_junction_match,
     )
     searchNodePaths = []
     searchGoals = graph.goals
@@ -395,7 +398,7 @@ def plan_spatial_path(
                 True, select_optimal_paths(candidates, reference),
                 searchNodePaths=tuple(searchNodePaths))
 
-        if safeNodePaths:
+        if safeNodePaths and graph.historyJunctionExit is None:
             terminal = graph.nodes[goal_id]
             terminal_reason = (
                 "REVERSE_POINT" if "R" in terminal.roles
@@ -498,7 +501,8 @@ def _build_graph(
         lines, line_lane_segments,
         current, current_heading, reference, polygons,
         static_info, dynamic_info, reverse_point, continuation_path,
-        stop_at_route_end, destination_lane_id, current_lane_id):
+        stop_at_route_end, destination_lane_id, current_lane_id,
+        history_junction_match=False):
     line_metrics = [_LineMetric.from_line(line) for line in lines]
     reference_metric = _LineMetric.from_line(reference)
     cross_metric = max(line_metrics, key=lambda metric: metric.total)
@@ -883,7 +887,11 @@ def _build_graph(
         tuple(tuple(
             (float(segment.startS), float(segment.endS))
             for segment in segments if segment.isJunction
-        ) for segments in line_lane_segments))
+        ) for segments in line_lane_segments),
+        (line_metrics[current_line].values_at(
+            [current_junction_end_s])[0][0]
+         if history_junction_match and current_junction_end_s is not None
+         else None))
     if current_junction_end_s is None:
         _prefer_safe_continuation_edge(
             graph, edge_keys, continuation_path,
@@ -1187,7 +1195,8 @@ def _strict_candidates(
                 score = length + PATH_REFERENCE_WEIGHT * lateral
                 safe_baselines.append((score, node_path))
 
-                maximum = _max_validation_curvature(path)
+                checked_path = _path_after_history_junction_exit(graph, path)
+                maximum = _max_validation_curvature(checked_path)
                 limit = (
                     PATH_CURVATURE_TOLERANCE
                     / max(float(static_info["minTurningRadius"]), 1e-6)
@@ -1196,9 +1205,10 @@ def _strict_candidates(
                     continue
                 sampled = resample_polyline(
                     path, PATH_OUTPUT_POINT_SPACING)
+                scored_path = _path_after_history_junction_exit(graph, sampled)
                 scored_curvature = float(np.max(path_curvatures(
-                    sampled, PATH_CURVATURE_WINDOW
-                ))) if len(sampled) > 2 else 0.0
+                    scored_path, PATH_CURVATURE_WINDOW
+                ))) if len(scored_path) > 2 else 0.0
                 lane_change_boundaries = ()
                 if start_off_line and len(node_path) >= 2:
                     lane_change_boundaries = ((
@@ -1278,7 +1288,9 @@ def _strict_candidates(
             if edge_ids and graph.edges[edge_ids[-1]].kind == "GLOBAL":
                 curvature_edge_ids = edge_ids[:-1]
             curvature_path = _join_edges(graph, curvature_edge_ids)
-            maximum = _max_validation_curvature(curvature_path)
+            checked_path = _path_after_history_junction_exit(
+                graph, curvature_path)
+            maximum = _max_validation_curvature(checked_path)
             limit = (
                 PATH_CURVATURE_TOLERANCE
                 / max(float(static_info["minTurningRadius"]), 1e-6)
@@ -1296,9 +1308,11 @@ def _strict_candidates(
             sampled = resample_polyline(path, PATH_OUTPUT_POINT_SPACING)
             sampled_curvature_path = resample_polyline(
                 curvature_path, PATH_OUTPUT_POINT_SPACING)
+            scored_path = _path_after_history_junction_exit(
+                graph, sampled_curvature_path)
             scored_curvature = float(np.max(path_curvatures(
-                sampled_curvature_path, PATH_CURVATURE_WINDOW
-            ))) if len(sampled_curvature_path) > 2 else 0.0
+                scored_path, PATH_CURVATURE_WINDOW
+            ))) if len(scored_path) > 2 else 0.0
             valid.append(PathCandidate(
                 sampled, 0.0, signature, scored_curvature,
                 laneChangeBoundaries=_edge_lane_change_boundaries(
@@ -1571,9 +1585,27 @@ def _join_edges(graph, edge_ids):
     return clean_xy(path)
 
 
+def _path_after_history_junction_exit(graph, path):
+    "历史虚拟车道匹配时，只豁免实际位置到旧出口的曲率。"
+    exit_point = graph.historyJunctionExit
+    if exit_point is None or len(path) < 2:
+        return path
+    projection = project_to_polyline(exit_point, path)
+    if projection['distance'] > 1e-2:
+        return path
+    total = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+    return slice_polyline(path, projection['s'], total)
+
+
 def _invalid_pair(
         graph, edge_ids, polygons, static_info, dynamic_info, collision):
     for previous, current in zip(edge_ids[:-1], edge_ids[1:]):
+        if (not collision and graph.historyJunctionExit is not None
+                and graph.edges[previous].source == 'S'
+                and np.linalg.norm(
+                    graph.nodes[graph.edges[previous].target].point
+                    - graph.historyJunctionExit) <= 1e-2):
+            continue
         joined = append_polyline(
             graph.edges[previous].geometry,
             graph.edges[current].geometry,

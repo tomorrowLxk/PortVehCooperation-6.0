@@ -666,6 +666,8 @@ class PlanningEngine:
                 planner.update_position_match(
                     self.vehicleDynamicInfoCaches[vehicleId],
                     self.reversePointCaches.get(vehicleId),
+                    self.vehicleBasePathCaches.get(vehicleId),
+                    self.vehicleBasePathLaneIDCaches.get(vehicleId),
                 )
 
         # todo. 五、为必要车辆生成basePath，并更新vehicleBasePathCaches。
@@ -714,6 +716,7 @@ class PlanningEngine:
                 reverse_point=self.reversePointCaches.get(vehicleId),
                 polygons=vehi_obstacle_polygons,
                 previous_base_path=oldBasePath,
+                previous_base_path_lane_ids=self.vehicleBasePathLaneIDCaches.get(vehicleId),
                 prefer_previous_path=(
                     historyFinished
                     and not vehicleDeviated

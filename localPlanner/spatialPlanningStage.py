@@ -130,7 +130,8 @@ def plan_hv_spatial(
 def plan_agv_spatial(
         dynamic_info, static_info, planning_max_speed,
         drivable_area_planner, reverse_point, polygons,
-        previous_base_path=None, prefer_previous_path=False):
+        previous_base_path=None, previous_base_path_lane_ids=None,
+        prefer_previous_path=False):
     """生成一辆AGV的basePath候选，不写接口response。"""
     position = np.asarray(dynamic_info["position"], dtype=float)[:2]
     heading = float(dynamic_info["heading"])
@@ -156,6 +157,8 @@ def plan_agv_spatial(
             currentHeading=heading,
             currentSpeed=speed,
             reversePoint=active_reverse_point,
+            previousBasePath=previous_base_path,
+            previousBasePathLaneIds=previous_base_path_lane_ids,
         )
     except Exception:
         reason = "DRIVABLE_AREA_PLANNING_FAILED"
@@ -186,6 +189,7 @@ def plan_agv_spatial(
             current_heading=heading,
             reference_line=reference_line,
             current_lane_id=drivable_area_planner.lastLaneId,
+            history_junction_match=drivable_area_planner.historyJunctionMatchApplied,
             destination_lane_id=(
                 drivable_area_planner.referLaneIds[-1]
                 if drivable_area_planner.referLaneIds else None

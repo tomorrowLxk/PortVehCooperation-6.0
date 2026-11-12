@@ -35,6 +35,7 @@ JUNCTION_EXIT_PATH_EXTENSION = 5.0  # 前视末端落在交叉口内部时，出
 JUNCTION_EXIT_DESTINATION_MERGE_DISTANCE = 2.0  # 出口点与全局终点沿路径距离不超过该值时合并，单位m
 DRIVABLE_LINE_MAX_COUNT = 3  # 每辆车每帧最多输出的局部可行线数量
 VEHICLE_LANE_LOCATE_MAX_DISTANCE = 10.0  # 车辆位置允许匹配到车道中心线的最大横向距离，单位m
+VEHICLE_JUNCTION_HISTORY_MATCH_MAX_DISTANCE = 5.0  # 路口内沿用历史规划虚拟车道的最大偏离距离，单位m
 VEHICLE_LANE_LOCATE_HEADING_MIN_SPEED = 0.5  # 车辆速度低于该值时，位置匹配不使用航向约束，单位m/s
 VEHICLE_LANE_LOCATE_HEADING_WEIGHT = 1.0  # 位置匹配评分中航向误差的权重
 VEHICLE_LANE_LOCATE_ROUTE_PREFERENCE = 0.5  # 非长路径参考车道参与位置匹配时增加的评分代价

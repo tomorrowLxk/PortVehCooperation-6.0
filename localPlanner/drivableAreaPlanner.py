@@ -18,6 +18,7 @@ from parameters import (
     VEHICLE_LANE_LOCATE_HEADING_MIN_SPEED,
     VEHICLE_LANE_LOCATE_HEADING_WEIGHT,
     VEHICLE_LANE_LOCATE_MAX_DISTANCE,
+    VEHICLE_JUNCTION_HISTORY_MATCH_MAX_DISTANCE,
     VEHICLE_LANE_LOCATE_ROUTE_PREFERENCE,
     VEHICLE_LANE_LOCATE_TOPOLOGY_DEPTH,
 )
@@ -215,6 +216,7 @@ class DrivableAreaPlanner:
         self.dxmProtectedLaneIds = frozenset(dxm_protected_lanes)
         self.is_dxm_update_protected = False
         self.lastLaneId = None
+        self.historyJunctionMatchApplied = False
         self.lastLaneS = None
         self.lastRouteS = resume_route_s
         self.lastRouteStageIndex = None
@@ -503,7 +505,9 @@ class DrivableAreaPlanner:
         return None
 
     def _update_position_match(self, dynamic_info, reverse_point,
-                               initial=False):
+                               initial=False, previous_base_path=None,
+                               previous_base_path_lane_ids=None):
+        self.historyJunctionMatchApplied = False
         if not dynamic_info or not dynamic_info.get('valid', True):
             return None
 
@@ -636,6 +640,37 @@ class DrivableAreaPlanner:
             return None
 
         _, _, _, stage_index, lane, lane_s = min(ranked)
+        if (not initial and lane in self.junctionLaneIds
+                and previous_base_path is not None
+                and previous_base_path_lane_ids is not None):
+            old_path = np.asarray(previous_base_path, dtype=float)
+            old_lane_ids = previous_base_path_lane_ids
+            if (old_path.ndim == 2 and len(old_path) >= 2
+                    and len(old_lane_ids) == len(old_path)):
+                old_xy = old_path[:, :2]
+                segments = np.diff(old_xy, axis=0)
+                lengths_sq = np.einsum('ij,ij->i', segments, segments)
+                ratios = np.divide(
+                    np.einsum('ij,ij->i', position - old_xy[:-1], segments),
+                    lengths_sq,
+                    out=np.zeros(len(segments), dtype=float),
+                    where=lengths_sq > 1e-12,
+                )
+                ratios = np.clip(ratios, 0.0, 1.0)
+                projections = old_xy[:-1] + ratios[:, None] * segments
+                distances_sq = np.einsum(
+                    'ij,ij->i', projections - position, projections - position)
+                segment_index = int(np.argmin(distances_sq))
+                if (distances_sq[segment_index]
+                        <= VEHICLE_JUNCTION_HISTORY_MATCH_MAX_DISTANCE ** 2):
+                    sample_index = segment_index + int(ratios[segment_index] >= 0.5)
+                    old_lane = old_lane_ids[sample_index]
+                    if (old_lane in self.junctionLaneIds
+                            and old_lane in self.routeStages[stage_index]):
+                        lane = old_lane
+                        lane_s = self._project_to_line(
+                            position, self.centerline_dict[lane])[0]
+                        self.historyJunctionMatchApplied = True
         minimum_s, maximum_s = self.routeStageBounds[stage_index]
         route_window = self._slice_line(
             self.referLine, minimum_s, maximum_s
@@ -662,12 +697,16 @@ class DrivableAreaPlanner:
             'routeS': self.lastRouteS,
         }
 
-    def update_position_match(self, dynamicInfo, reversePoint=None):
+    def update_position_match(self, dynamicInfo, reversePoint=None,
+                              previousBasePath=None,
+                              previousBasePathLaneIds=None):
         """只更新车辆在完整可行域和全局参考线上的匹配进度。"""
         return self._update_position_match(
             dynamicInfo,
             reversePoint,
             initial=False,
+            previous_base_path=previousBasePath,
+            previous_base_path_lane_ids=previousBasePathLaneIds,
         )
 
     def _build_stage_ranges(self, route_stages, connector_dict,
@@ -1277,7 +1316,8 @@ class DrivableAreaPlanner:
         return DrivableLine(result, tuple(lane_segments))
 
     def plan(self, currentPosition, currentHeading=0.0,
-             currentSpeed=0.0, reversePoint=None):
+             currentSpeed=0.0, reversePoint=None,
+             previousBasePath=None, previousBasePathLaneIds=None):
         "更新本帧位置匹配；局部可行线将在下一阶段实现。"
         location = self._update_position_match(
             {
@@ -1288,6 +1328,8 @@ class DrivableAreaPlanner:
             },
             reversePoint,
             initial=False,
+            previous_base_path=previousBasePath,
+            previous_base_path_lane_ids=previousBasePathLaneIds,
         )
         if location is None:
             return [], None
