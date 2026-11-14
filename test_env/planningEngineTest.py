@@ -689,6 +689,9 @@ class PlanningEngine:
             if request.get('deviceType') != 'AGV':
                 continue
             vehicleId = str(request.get('deviceId'))
+            responseCode = (request.get('vehicleResponse') or {}).get('code')
+            if responseCode in ('REPLAN', 'REDISPATCH'):
+                self.finalDestinationVehicleIds.discard(vehicleId)
             if vehicleId in self.finalDestinationVehicleIds:
                 continue
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
@@ -701,8 +704,9 @@ class PlanningEngine:
                 vehicleId, dynamicInfo, vehi_obstacle_polygons)
             (noHistory, historyFinished,
              vehicleDeviated, historyBlocked) = replanFlags
-            if not any(replanFlags):
-                if self.shouldRefreshAgvWaypointResponse(vehicleId, dynamicInfo):
+            if not any(replanFlags) and responseCode != 'REPLAN':
+                if (responseCode == 'REDISPATCH'
+                        or self.shouldRefreshAgvWaypointResponse(vehicleId, dynamicInfo)):
                     self.vehicleIdsMustDispatch.add(vehicleId)
                 AGV_basePathCandidates[vehicleId] = [self.vehicleBasePathCaches[vehicleId].copy()]
                 agvExecutableShortPathVehicleIds.add(vehicleId)
@@ -813,6 +817,9 @@ class PlanningEngine:
                 )
             if agv_spatial_result.reversePointReached:
                 self.reversePointCaches.pop(vehicleId, None)
+            if responseCode in ('REPLAN', 'REDISPATCH'):
+                self.vehicleIdsMustNotDispatch.discard(vehicleId)
+                self.vehicleIdsMustDispatch.add(vehicleId)
 
         # 本帧BSM中的全部非AGV每帧更新。有历史route缓存时保持横向d并沿纵向s延伸固定空间长度；没有route缓存时按当前速度预测固定时长。
         for rawVehicleId in allVehicleStates:
