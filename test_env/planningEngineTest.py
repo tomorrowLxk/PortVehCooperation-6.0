@@ -1150,6 +1150,8 @@ class PlanningEngine:
             response['pathId'] = (
                 f"{vehicleId}_{request.get('commandId')}_{time.time_ns()}"
             )
+            if not response.get('success', True):
+                response['code'] = 'NO_AVAILABLE_ROUTE'
             finalResponses.append(response)
             self.vehicleWaypointResponseCaches[vehicleId] = waypointResponse
             self.vehicleDispatchedPathVOCaches[vehicleId] = tuple(
