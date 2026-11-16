@@ -297,7 +297,7 @@ def vehicle_polygon(position, heading, length, width,
     ])
 
 
-def _polygons_intersect_clean(left, right):
+def polygons_intersect(left, right):
     if len(left) < 3 or len(right) < 3:
         return False
     if (

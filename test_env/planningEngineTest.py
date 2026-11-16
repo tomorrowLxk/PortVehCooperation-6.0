@@ -696,7 +696,8 @@ class PlanningEngine:
                 continue
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
             staticInfo = self.vehicleStaticInfoCaches[vehicleId]
-            vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
+            vehi_obstacle_polygons = exclude_vehi_polygons(
+                all_obstacle_polygons, dynamicInfo, staticInfo)
             oldBasePath = self.vehicleBasePathCaches.get(vehicleId)
             if oldBasePath is not None:
                 oldBasePath = clean_xy(oldBasePath).copy()
@@ -828,7 +829,8 @@ class PlanningEngine:
             if staticInfo.get('vehicleType') == 'AGV':
                 continue
             dynamicInfo = self.vehicleDynamicInfoCaches[vehicleId]
-            vehi_obstacle_polygons = exclude_vehi_polygons(all_obstacle_polygons, dynamicInfo)
+            vehi_obstacle_polygons = exclude_vehi_polygons(
+                all_obstacle_polygons, dynamicInfo, staticInfo)
             hv_spatial_result = plan_hv_spatial(
                 dynamic_info=dynamicInfo,
                 static_info=staticInfo,

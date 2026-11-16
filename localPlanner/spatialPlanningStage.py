@@ -7,7 +7,7 @@ import numpy as np
 
 from localPlanner.pathCollision import (
     first_polygon_stop_s,
-    point_in_polygon,
+    polygons_intersect,
     polygon_xy,
     vehicle_polygon,
 )
@@ -32,6 +32,7 @@ from parameters import (
     FUTURE_PATH_POINT_SPACING,
     HV_PREDICTION_HORIZON,
     PATH_CURVE_SAMPLE_SPACING,
+    PATH_LATERAL_SAFETY_MARGIN,
     PATH_CONTINUATION_COMPARE_DISTANCE,
     PATH_CONTINUATION_MAX_DEVIATION,
     PATH_STATIC_STOP_DISTANCE,
@@ -95,12 +96,18 @@ def build_obstacle_polygons(
     return [polygon for polygon in polygons if len(polygon) >= 3]
 
 
-def exclude_vehi_polygons(polygons, dynamic_info):
-    """排除包含当前车辆位置的polygon。"""
-    current = np.asarray(dynamic_info["position"], dtype=float)[:2]
+def exclude_vehi_polygons(polygons, dynamic_info, static_info):
+    """排除与当前车辆安全矩形仍相交的polygon。"""
+    current_vehicle = vehicle_polygon(
+        dynamic_info["position"], dynamic_info["heading"],
+        static_info["length"], static_info["width"],
+        dynamic_info.get("longitudinalUncertainty", 0.0),
+        dynamic_info.get("lateralUncertainty", 0.0)
+        + PATH_LATERAL_SAFETY_MARGIN,
+    )
     return [
         polygon for polygon in polygons
-        if not point_in_polygon(current, polygon)
+        if not polygons_intersect(current_vehicle, polygon)
     ]
 
 
