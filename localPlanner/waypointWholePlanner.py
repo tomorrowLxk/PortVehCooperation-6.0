@@ -976,6 +976,13 @@ def _apply_candidate_constraints(prepared, constraints, static, dynamic):
         if whole.arrivalTimes[index] >= required_time - 1e-6:
             continue
 
+        # Do not meet a clearance time by creeping below the stop threshold.
+        if (required_time > 0.0
+                and float(prepared['candidateS'][index]) / required_time
+                < COOPERATION_STOP_SPEED_THRESHOLD):
+            return _stop_before_constraint(
+                prepared, limits, index, segments, static, dynamic)
+
         node_index = int(candidate_nodes[index])
         first_adjustable = 1 if node_index > 0 else 0
         def capped_arrival(start_node):
