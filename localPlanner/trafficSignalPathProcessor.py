@@ -7,6 +7,7 @@ import numpy as np
 from localPlanner.pathGeometry import (
     clean_xy,
     heading_at_s,
+    point_at_s,
     polyline_length,
     project_to_polyline,
     project_points_to_polyline,
@@ -145,7 +146,12 @@ def _first_signal(
         state = lane_signals[lane_id].get(direction)
         if state is None:
             return None
-        return max(0.0, signal_s - TRAFFIC_SIGNAL_STOP_DISTANCE), state
+        lane_midpoint = point_at_s(
+            centerline, 0.5 * polyline_length(centerline))
+        midpoint_s = project_to_polyline(lane_midpoint, path_xy)['s']
+        stop_s = max(0.0, signal_s - TRAFFIC_SIGNAL_STOP_DISTANCE,
+                     min(midpoint_s, signal_s))
+        return stop_s, state
     return None
 
 
