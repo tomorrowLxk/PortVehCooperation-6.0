@@ -9,7 +9,11 @@ from localPlanner.pathGeometry import (
     slice_polyline,
 )
 from localPlanner.waypointWholePlanner import _overlap_matrix
-from parameters import COOPERATION_LATERAL_MARGIN
+from parameters import (
+    COOPERATION_LATERAL_MARGIN,
+    WAYPOINT_OUTPUT_FORWARD_TIME,
+    WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
+)
 
 
 _SAMPLE_SPACING = 2.0
@@ -29,9 +33,13 @@ def is_current_position_stop(waypoint_whole, dynamic):
 
 def select_noncrossing_responses(
         candidate_waypoints, priority_decisions, cached_responses,
-        vehicle_dynamic_info, vehicle_static_info, stop_clearance):
+        vehicle_dynamic_info, vehicle_static_info, stop_clearance,
+        fallback_waypoints=None):
     """Return prefixes to issue; None means keep the old response, if any."""
     selected = {}
+    forced_updates = set()
+    stop_fallbacks = set()
+    fallback_waypoints = fallback_waypoints or {}
     for decision in priority_decisions:
         higher_geometries = []
         for vehicle_id in decision.priorityOrder:
@@ -42,14 +50,58 @@ def select_noncrossing_responses(
             if vehicle_id in candidate_waypoints:
                 waypoints = np.asarray(
                     candidate_waypoints[vehicle_id], dtype=float)
-                selected[vehicle_id] = _trim_to_safe_prefix(
+                prefix, conflict = _trim_to_safe_prefix(
                     waypoints, dynamic, static, higher_geometries,
                     stop_clearance)
-                active = selected[vehicle_id]
+                if prefix is None and conflict:
+                    prefix = _forward_stop_waypoint(
+                        fallback_waypoints.get(vehicle_id, waypoints), dynamic)
+                    if prefix is not None:
+                        stop_fallbacks.add(vehicle_id)
+                selected[vehicle_id] = prefix
+                active = prefix
                 if active is None:
                     active = cached_responses.get(vehicle_id)
             else:
                 active = cached_responses.get(vehicle_id)
+                if active is not None and len(active) and higher_geometries:
+                    minimum = max(
+                        WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
+                        max(0.0, float(dynamic['speed']))
+                        * WAYPOINT_OUTPUT_FORWARD_TIME)
+                    remaining = _forward_waypoints(active, dynamic, minimum)
+                    if len(remaining):
+                        prefix, conflict = _trim_to_safe_prefix(
+                            remaining, dynamic, static, higher_geometries,
+                            stop_clearance)
+                        if conflict:
+                            if prefix is None:
+                                prefix = _forward_stop_waypoint(
+                                    fallback_waypoints.get(vehicle_id, active),
+                                    dynamic)
+                                if prefix is not None:
+                                    stop_fallbacks.add(vehicle_id)
+                            if prefix is not None and not np.array_equal(
+                                    prefix, np.asarray(active, dtype=float)):
+                                selected[vehicle_id] = prefix
+                                forced_updates.add(vehicle_id)
+                                active = prefix
+                    else:
+                        old_geometry = _remaining_geometry(active, dynamic, static)
+                        conflict = any(
+                            _boxes_intersect(old_geometry['bounds'], high['bounds'])
+                            and np.any(_overlap_matrix(old_geometry, high))
+                            for high in higher_geometries)
+                        if conflict:
+                            prefix = _forward_stop_waypoint(
+                                fallback_waypoints.get(vehicle_id, active),
+                                dynamic)
+                            if prefix is not None and not np.array_equal(
+                                    prefix, np.asarray(active, dtype=float)):
+                                selected[vehicle_id] = prefix
+                                forced_updates.add(vehicle_id)
+                                stop_fallbacks.add(vehicle_id)
+                                active = prefix
             if active is not None and len(active):
                 geometry = _remaining_geometry(active, dynamic, static)
                 if geometry is not None:
@@ -59,22 +111,83 @@ def select_noncrossing_responses(
     for vehicle_id, waypoints in candidate_waypoints.items():
         if vehicle_id not in selected:
             selected[vehicle_id] = np.asarray(waypoints, dtype=float).copy()
-    return selected
+    return selected, forced_updates, stop_fallbacks
+
+
+def _forward_waypoints(waypoints, dynamic, minimum_distance):
+    values = np.asarray(waypoints, dtype=float)
+    if len(values) == 0:
+        return values
+    position = np.asarray(dynamic['position'], dtype=float)[:2]
+    points = values[:, :2]
+    if len(points) == 1:
+        heading = float(dynamic['heading'])
+        tangent = np.asarray([math.cos(heading), math.sin(heading)])
+        forward = float((points[0] - position) @ tangent)
+        return values.copy() if forward >= minimum_distance - 1e-9 else values[:0]
+    path_s = arc_lengths(points)
+    current_s = float(project_to_polyline(position, points)['s'])
+    segments = np.diff(points, axis=0)
+    nonzero = np.flatnonzero(np.linalg.norm(segments, axis=1) > 1e-9)
+    tangent = (segments[int(nonzero[0])] if len(nonzero)
+               else np.asarray([math.cos(float(dynamic['heading'])),
+                                math.sin(float(dynamic['heading']))]))
+    length = float(np.linalg.norm(tangent))
+    offset = (max(0.0, float((points[0] - position) @ tangent / length))
+              if current_s <= 1e-9 and length > 1e-9 else 0.0)
+    eligible = np.flatnonzero(
+        path_s - current_s + offset >= minimum_distance - 1e-9)
+    return values[int(eligible[0]):].copy() if len(eligible) else values[:0]
+
+
+def _forward_stop_waypoint(waypoints, dynamic):
+    minimum = max(
+        WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
+        max(0.0, float(dynamic['speed'])) * WAYPOINT_OUTPUT_FORWARD_TIME,
+    )
+    remaining = _forward_waypoints(waypoints, dynamic, minimum)
+    if len(remaining) == 0:
+        return None
+    stop = remaining[:1].copy()
+    stop[0, 3:] = 0.0
+    return stop
+
+
+def moving_waypoint_prefix(waypoints):
+    values = np.asarray(waypoints, dtype=float)
+    if len(values) < 2:
+        return None
+    last_moving_index = None
+    for index in range(len(values) - 1):
+        distance = float(np.linalg.norm(
+            values[index + 1, :2] - values[index, :2]))
+        if distance <= 1e-9:
+            continue
+        start_time, end_time = values[index, 4], values[index + 1, 4]
+        duration = (float(end_time - start_time)
+                    if np.isfinite(start_time) and np.isfinite(end_time)
+                    else math.inf)
+        if not math.isfinite(duration) or duration <= 1e-9:
+            return (values[:last_moving_index + 1].copy()
+                    if last_moving_index is not None else None)
+        last_moving_index = index + 1
+    return (values[:last_moving_index + 1].copy()
+            if last_moving_index is not None else None)
 
 
 def _trim_to_safe_prefix(
         waypoints, dynamic, static, higher_geometries, stop_clearance):
     if len(waypoints) == 0:
-        return None
+        return None, False
     if not higher_geometries:
-        return waypoints.copy()
+        return waypoints.copy(), False
     position = np.asarray(dynamic['position'], dtype=float)[:2]
     points = np.vstack((position, waypoints[:, :2]))
     waypoint_s = np.r_[0.0, np.cumsum(np.linalg.norm(
         np.diff(points, axis=0), axis=1))]
     low = _remaining_geometry(waypoints, dynamic, static)
     if low is None:
-        return None
+        return None, False
     first_conflict = math.inf
     for high in higher_geometries:
         if not _boxes_intersect(low['bounds'], high['bounds']):
@@ -87,14 +200,18 @@ def _trim_to_safe_prefix(
             first_conflict = min(
                 first_conflict, float(low['sampleS'][max(0, index - 1)]))
     if not math.isfinite(first_conflict):
-        return waypoints.copy()
+        return waypoints.copy(), False
     safe_end = first_conflict - max(0.0, float(stop_clearance))
     legal = np.flatnonzero(
         (waypoint_s[1:] <= safe_end + 1e-9)
         & (waypoint_s[1:] > 1e-9))
     if len(legal) == 0:
-        return None
-    return waypoints[:int(legal[-1]) + 1].copy()
+        return None, True
+    prefix = waypoints[:int(legal[-1]) + 1].copy()
+    if len(prefix) < 2 or not np.any(
+            np.linalg.norm(np.diff(prefix[:, :2], axis=0), axis=1) > 1e-9):
+        return None, True
+    return prefix, True
 
 
 def _remaining_geometry(waypoints, dynamic, static):

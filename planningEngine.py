@@ -40,6 +40,7 @@ from localPlanner.spatialPlanningStage import (
 from localPlanner.pathCollision import path_vehicle_intersects
 from localPlanner.responseCrossFilter import (
     is_current_position_stop,
+    moving_waypoint_prefix,
     select_noncrossing_responses,
 )
 from localPlanner.responsePlanner import build_response_path_lists
@@ -1054,6 +1055,8 @@ class PlanningEngine:
         finalResponses = []
         noncrossWaypoints = None
         if not if_cross:
+            forcedNoncrossUpdates = set()
+            noncrossStopFallbacks = set()
             candidatesToIssue = {
                 str(request.get('deviceId')): waypointSparseResults[
                     str(request.get('deviceId'))]
@@ -1069,19 +1072,29 @@ class PlanningEngine:
                             self.vehicleDynamicInfoCaches[
                                 str(request.get('deviceId'))]))
             }
-            noncrossWaypoints = select_noncrossing_responses(
+            for candidateId in tuple(candidatesToIssue):
+                prefix = moving_waypoint_prefix(candidatesToIssue[candidateId])
+                if prefix is None:
+                    candidatesToIssue.pop(candidateId)
+                else:
+                    candidatesToIssue[candidateId] = prefix
+            (noncrossWaypoints, forcedNoncrossUpdates,
+             noncrossStopFallbacks) = select_noncrossing_responses(
                 candidate_waypoints=candidatesToIssue,
                 priority_decisions=priorityDecisions,
                 cached_responses=self.vehicleWaypointResponseCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
                 vehicle_static_info=self.vehicleStaticInfoCaches,
                 stop_clearance=OUTPUT_CROSS_CLEARANCE_M,
+                fallback_waypoints=waypointSparseResults,
             )
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
             if vehicleId in self.finalDestinationVehicleIds:
                 continue
-            if vehicleId not in self.vehicleIdsNeedWaypointUpdate:
+            if (vehicleId not in self.vehicleIdsNeedWaypointUpdate
+                    and (noncrossWaypoints is None
+                         or vehicleId not in forcedNoncrossUpdates)):
                 continue
             response = allResponses[requestIndex]
             planner = self.drivableAreaPlannerCaches.get(vehicleId)
@@ -1115,6 +1128,30 @@ class PlanningEngine:
                 base_candidates=(
                     self.vehicleBaseWaypointCandidateCaches.get(vehicleId)),
             )
+            if noncrossWaypoints is not None and request.get('deviceType') == 'AGV':
+                if vehicleId in noncrossStopFallbacks:
+                    for segment in shortPathList + mergePathList:
+                        segment['isFinalDestination'] = False
+                else:
+                    allowed = 0
+                    for segment in shortPathList:
+                        first, last = segment['points'][0], segment['points'][-1]
+                        distance = np.hypot(
+                            float(last['x']) - float(first['x']),
+                            float(last['y']) - float(first['y']))
+                        if distance <= 1e-9 or float(segment['speedLimit']) <= 0.0:
+                            break
+                        allowed += 1
+                    if allowed == 0:
+                        continue
+                    moving = np.flatnonzero(
+                        np.linalg.norm(
+                            np.diff(waypointResponse[:, :2], axis=0),
+                            axis=1) > 1e-9)
+                    waypointResponse = waypointResponse[
+                        :int(moving[allowed - 1]) + 2].copy()
+                    shortPathList = shortPathList[:allowed]
+                    mergePathList = mergePathList[:allowed]
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList
             response['pathId'] = (
