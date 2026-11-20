@@ -77,7 +77,7 @@ def select_noncrossing_responses(
                         if conflict:
                             if prefix is None:
                                 prefix = _forward_stop_waypoint(
-                                    fallback_waypoints.get(vehicle_id, active),
+                                    active,
                                     dynamic)
                                 if prefix is not None:
                                     stop_fallbacks.add(vehicle_id)
@@ -94,7 +94,7 @@ def select_noncrossing_responses(
                             for high in higher_geometries)
                         if conflict:
                             prefix = _forward_stop_waypoint(
-                                fallback_waypoints.get(vehicle_id, active),
+                                active,
                                 dynamic)
                             if prefix is not None and not np.array_equal(
                                     prefix, np.asarray(active, dtype=float)):
