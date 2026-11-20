@@ -153,10 +153,12 @@ def _forward_stop_waypoint(waypoints, dynamic):
     return stop
 
 
-def moving_waypoint_prefix(waypoints):
+def moving_waypoint_prefix(waypoints, dynamic):
     values = np.asarray(waypoints, dtype=float)
-    if len(values) < 2:
+    if len(values) == 0:
         return None
+    if len(values) == 1:
+        return _forward_stop_waypoint(values, dynamic)
     last_moving_index = None
     for index in range(len(values) - 1):
         distance = float(np.linalg.norm(
@@ -169,10 +171,12 @@ def moving_waypoint_prefix(waypoints):
                     else math.inf)
         if not math.isfinite(duration) or duration <= 1e-9:
             return (values[:last_moving_index + 1].copy()
-                    if last_moving_index is not None else None)
+                    if last_moving_index is not None
+                    else _forward_stop_waypoint(values[:1], dynamic))
         last_moving_index = index + 1
     return (values[:last_moving_index + 1].copy()
-            if last_moving_index is not None else None)
+            if last_moving_index is not None
+            else _forward_stop_waypoint(values[:1], dynamic))
 
 
 def _trim_to_safe_prefix(
@@ -208,9 +212,8 @@ def _trim_to_safe_prefix(
     if len(legal) == 0:
         return None, True
     prefix = waypoints[:int(legal[-1]) + 1].copy()
-    if len(prefix) < 2 or not np.any(
-            np.linalg.norm(np.diff(prefix[:, :2], axis=0), axis=1) > 1e-9):
-        return None, True
+    if len(prefix) == 1:
+        prefix[0, 3:] = 0.0
     return prefix, True
 
 

@@ -41,6 +41,7 @@ from localPlanner.spatialPlanningStage import (
 from localPlanner.pathCollision import path_vehicle_intersects
 from localPlanner.responseCrossFilter import (
     is_current_position_stop,
+    moving_waypoint_prefix,
     select_noncrossing_responses,
 )
 from localPlanner.responsePlanner import build_response_path_lists
@@ -616,6 +617,7 @@ class PlanningEngine:
     ) -> List[Any]:
         laneSignal_zy = normalize_lane_signals(laneSignal_zy)
         if_cross = True
+        self.ifCross = if_cross
         self.vehicleIdsNeedWaypointUpdate.clear()
         self.vehicleIdsMustDispatch.clear()
         self.vehicleIdsMustNotDispatch.clear()
@@ -1086,6 +1088,8 @@ class PlanningEngine:
         finalResponses = []
         noncrossWaypoints = None
         if not if_cross:
+            forcedNoncrossUpdates = set()
+            noncrossStopFallbacks = set()
             candidatesToIssue = {
                 str(request.get('deviceId')): waypointSparseResults[
                     str(request.get('deviceId'))]
@@ -1101,19 +1105,42 @@ class PlanningEngine:
                         self.vehicleDynamicInfoCaches[
                             str(request.get('deviceId'))]))
             }
-            noncrossWaypoints = select_noncrossing_responses(
+            reachableWaypoints = {}
+            for candidateId in tuple(candidatesToIssue):
+                waypoints = candidatesToIssue[candidateId]
+                unreachable = np.flatnonzero(~np.isfinite(waypoints[:, 4]))
+                reachable = (
+                    waypoints[:int(unreachable[0])]
+                    if len(unreachable) else waypoints
+                )
+                if len(reachable) == 0:
+                    candidatesToIssue.pop(candidateId)
+                    continue
+                prefix = moving_waypoint_prefix(
+                    reachable,
+                    self.vehicleDynamicInfoCaches[candidateId])
+                if prefix is None:
+                    candidatesToIssue.pop(candidateId)
+                else:
+                    candidatesToIssue[candidateId] = prefix
+                    reachableWaypoints[candidateId] = reachable
+            (noncrossWaypoints, forcedNoncrossUpdates,
+             noncrossStopFallbacks) = select_noncrossing_responses(
                 candidate_waypoints=candidatesToIssue,
                 priority_decisions=priorityDecisions,
                 cached_responses=self.vehicleWaypointResponseCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
                 vehicle_static_info=self.vehicleStaticInfoCaches,
                 stop_clearance=OUTPUT_CROSS_CLEARANCE_M,
+                fallback_waypoints=reachableWaypoints,
             )
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
             if vehicleId in self.finalDestinationVehicleIds:
                 continue
-            if vehicleId not in self.vehicleIdsNeedWaypointUpdate:
+            if (vehicleId not in self.vehicleIdsNeedWaypointUpdate
+                    and (noncrossWaypoints is None
+                         or vehicleId not in forcedNoncrossUpdates)):
                 continue
             response = allResponses[requestIndex]
             planner = self.drivableAreaPlannerCaches.get(vehicleId)
@@ -1135,6 +1162,9 @@ class PlanningEngine:
                 waypointResponse = noncrossWaypoints.get(vehicleId)
                 if waypointResponse is None:
                     continue
+                if len(waypointResponse) == 1:
+                    waypointResponse = waypointResponse.copy()
+                    waypointResponse[0, 3:] = 0.0
             shortPathList, mergePathList = build_response_path_lists(
                 waypoints=waypointResponse,
                 planned_path=responsePath,
@@ -1147,6 +1177,30 @@ class PlanningEngine:
                 base_candidates=(
                     self.vehicleBaseWaypointCandidateCaches.get(vehicleId)),
             )
+            if noncrossWaypoints is not None and request.get('deviceType') == 'AGV':
+                if vehicleId in noncrossStopFallbacks:
+                    for segment in shortPathList + mergePathList:
+                        segment['isFinalDestination'] = False
+                elif len(waypointResponse) > 1:
+                    allowed = 0
+                    for segment in shortPathList:
+                        first, last = segment['points'][0], segment['points'][-1]
+                        distance = np.hypot(
+                            float(last['x']) - float(first['x']),
+                            float(last['y']) - float(first['y']))
+                        if distance <= 1e-9 or float(segment['speedLimit']) <= 0.0:
+                            break
+                        allowed += 1
+                    if allowed == 0:
+                        continue
+                    moving = np.flatnonzero(
+                        np.linalg.norm(
+                            np.diff(waypointResponse[:, :2], axis=0),
+                            axis=1) > 1e-9)
+                    waypointResponse = waypointResponse[
+                        :int(moving[allowed - 1]) + 2].copy()
+                    shortPathList = shortPathList[:allowed]
+                    mergePathList = mergePathList[:allowed]
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList
             response['pathId'] = (
