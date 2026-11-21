@@ -1,4 +1,5 @@
 import time
+from copy import deepcopy
 import numpy as np
 from typing import Any, Dict, List
 
@@ -106,6 +107,8 @@ class PlanningEngine:
         self.vehicleWaypointResponseCaches: Dict[str, Any] = {}
         # Segments of the last response actually sent to the vehicle.
         self.vehicleDispatchedPathVOCaches: Dict[str, Any] = {}
+        # Only for if_cross=False: exact PathVOs last issued after postprocessing.
+        self.vehicleNoncrossPathVOCaches: Dict[str, Any] = {}
         # 本帧必须重新向车端下发waypoint的车辆ID；每帧开始时清空。
         self.vehicleIdsNeedWaypointUpdate: set[str] = set()
         # 本帧空间重规划已经能够确定必须下发或必须不下发的车辆ID。
@@ -193,6 +196,7 @@ class PlanningEngine:
             self.vehicleWaypointSparseCaches.pop(vehicleId, None)
             self.vehicleWaypointResponseCaches.pop(vehicleId, None)
             self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
+            self.vehicleNoncrossPathVOCaches.pop(vehicleId, None)
             self.vehicleRouteProgressCaches.pop(vehicleId, None)
             self.vehicleTaskCaches.pop(vehicleId, None)
             return
@@ -211,6 +215,7 @@ class PlanningEngine:
                 self.vehicleWaypointSparseCaches.pop(vehicleId, None)
                 self.vehicleWaypointResponseCaches.pop(vehicleId, None)
                 self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
+                self.vehicleNoncrossPathVOCaches.pop(vehicleId, None)
                 self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
             self.vehicleTaskCaches[vehicleId] = {
@@ -267,6 +272,7 @@ class PlanningEngine:
         self.vehicleWaypointSparseCaches.pop(vehicleId, None)
         self.vehicleWaypointResponseCaches.pop(vehicleId, None)
         self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
+        self.vehicleNoncrossPathVOCaches.pop(vehicleId, None)
         self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
         # 调箱门修复属于局部规划上下文构建：新任务必修复，同任务仅在R点尚存时修复。
@@ -362,6 +368,7 @@ class PlanningEngine:
             self.vehicleWaypointSparseCaches,
             self.vehicleWaypointResponseCaches,
             self.vehicleDispatchedPathVOCaches,
+            self.vehicleNoncrossPathVOCaches,
             self.vehicleObstacleCaches,
             self.hvLowSpeedFrameCaches,
             self.reversePointCaches,
@@ -1215,6 +1222,15 @@ class PlanningEngine:
                         segment['isFinalDestination'] = False
                     if pathList:
                         pathList[-1]['isFinalDestination'] = isFinal
+                # A refresh asks us to try issuing; an unchanged postprocessed
+                # instruction does not need another dispatch. REDISPATCH is an
+                # explicit retry when the previous instruction may be lost.
+                responseCode = (request.get('vehicleResponse') or {}).get('code')
+                if (response.get('success', True)
+                        and responseCode != 'REDISPATCH'
+                        and self.vehicleNoncrossPathVOCaches.get(vehicleId)
+                        == shortPathList):
+                    continue
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList
             response['pathId'] = (
@@ -1224,6 +1240,8 @@ class PlanningEngine:
                 response['code'] = 'NO_AVAILABLE_ROUTE'
             finalResponses.append(response)
             self.vehicleWaypointResponseCaches[vehicleId] = waypointResponse
+            if noncrossWaypoints is not None and request.get('deviceType') == 'AGV':
+                self.vehicleNoncrossPathVOCaches[vehicleId] = deepcopy(shortPathList)
             self.vehicleDispatchedPathVOCaches[vehicleId] = tuple(
                 (
                     float(path['points'][0]['x']),
