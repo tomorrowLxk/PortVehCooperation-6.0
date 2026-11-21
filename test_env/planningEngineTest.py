@@ -22,6 +22,7 @@ from parameters import (
     PATH_COLLISION_SAMPLE_SPACING,
     PATH_LATERAL_SAFETY_MARGIN,
     OUTPUT_CROSS_CLEARANCE_M,
+    RESPONSE_DESTINATION_TOLERANCE,
 )
 
 from localPlanner.cooperationBlocker import group_by_future_paths
@@ -1089,7 +1090,6 @@ class PlanningEngine:
         noncrossWaypoints = None
         if not if_cross:
             forcedNoncrossUpdates = set()
-            noncrossStopFallbacks = set()
             candidatesToIssue = {
                 str(request.get('deviceId')): waypointSparseResults[
                     str(request.get('deviceId'))]
@@ -1125,7 +1125,7 @@ class PlanningEngine:
                     candidatesToIssue[candidateId] = prefix
                     reachableWaypoints[candidateId] = reachable
             (noncrossWaypoints, forcedNoncrossUpdates,
-             noncrossStopFallbacks) = select_noncrossing_responses(
+             _) = select_noncrossing_responses(
                 candidate_waypoints=candidatesToIssue,
                 priority_decisions=priorityDecisions,
                 cached_responses=self.vehicleWaypointResponseCaches,
@@ -1178,10 +1178,7 @@ class PlanningEngine:
                     self.vehicleBaseWaypointCandidateCaches.get(vehicleId)),
             )
             if noncrossWaypoints is not None and request.get('deviceType') == 'AGV':
-                if vehicleId in noncrossStopFallbacks:
-                    for segment in shortPathList + mergePathList:
-                        segment['isFinalDestination'] = False
-                elif len(waypointResponse) > 1:
+                if len(waypointResponse) > 1:
                     allowed = 0
                     for segment in shortPathList:
                         first, last = segment['points'][0], segment['points'][-1]
@@ -1201,6 +1198,23 @@ class PlanningEngine:
                         :int(moving[allowed - 1]) + 2].copy()
                     shortPathList = shortPathList[:allowed]
                     mergePathList = mergePathList[:allowed]
+                goal = (request.get('endPosition') or {}).get('position')
+                lastPoint = (
+                    shortPathList[-1]['points'][-1]
+                    if shortPathList else None
+                )
+                isFinal = bool(
+                    goal is not None and lastPoint is not None
+                    and np.hypot(
+                        float(lastPoint['x']) - float(goal['x']),
+                        float(lastPoint['y']) - float(goal['y']),
+                    ) <= RESPONSE_DESTINATION_TOLERANCE
+                )
+                for pathList in (shortPathList, mergePathList):
+                    for segment in pathList:
+                        segment['isFinalDestination'] = False
+                    if pathList:
+                        pathList[-1]['isFinalDestination'] = isFinal
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList
             response['pathId'] = (
