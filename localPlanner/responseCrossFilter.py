@@ -5,21 +5,15 @@ import math
 import numpy as np
 
 from localPlanner.pathGeometry import (
-    arc_lengths, clean_xy, project_to_polyline, resample_polyline,
-    slice_polyline,
+    arc_lengths, clean_xy, project_to_polyline, slice_polyline,
 )
-from localPlanner.waypointWholePlanner import _overlap_matrix
 from parameters import (
-    COOPERATION_LATERAL_MARGIN,
     WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
     WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE,
     WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE,
     WAYPOINT_OUTPUT_FORWARD_TIME,
     WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
 )
-
-
-_SAMPLE_SPACING = 2.0
 
 
 def same_noncross_response(old_paths, new_paths, old_waypoints,
@@ -102,24 +96,26 @@ def is_current_position_stop(waypoint_whole, dynamic):
 def select_noncrossing_responses(
         candidate_waypoints, priority_decisions, cached_responses,
         vehicle_dynamic_info, vehicle_static_info, stop_clearance,
-        fallback_waypoints=None):
+        fallback_waypoints=None, candidate_paths=None, cached_paths=None):
     """Return prefixes to issue; None means keep the old response, if any."""
     selected = {}
     forced_updates = set()
     stop_fallbacks = set()
     fallback_waypoints = fallback_waypoints or {}
+    candidate_paths = candidate_paths or {}
+    cached_paths = cached_paths or {}
     for decision in priority_decisions:
-        higher_geometries = []
+        higher_curves = []
         for vehicle_id in decision.priorityOrder:
             if vehicle_static_info[vehicle_id].get('vehicleType') != 'AGV':
                 continue
             dynamic = vehicle_dynamic_info[vehicle_id]
-            static = vehicle_static_info[vehicle_id]
             if vehicle_id in candidate_waypoints:
+                path = candidate_paths.get(vehicle_id)
                 waypoints = np.asarray(
                     candidate_waypoints[vehicle_id], dtype=float)
                 prefix, conflict = _trim_to_safe_prefix(
-                    waypoints, dynamic, static, higher_geometries,
+                    waypoints, dynamic, path, higher_curves,
                     stop_clearance)
                 if prefix is None and conflict:
                     prefix = _forward_stop_waypoint(
@@ -130,9 +126,11 @@ def select_noncrossing_responses(
                 active = prefix
                 if active is None:
                     active = cached_responses.get(vehicle_id)
+                    path = cached_paths.get(vehicle_id)
             else:
                 active = cached_responses.get(vehicle_id)
-                if active is not None and len(active) and higher_geometries:
+                path = cached_paths.get(vehicle_id)
+                if active is not None and len(active) and higher_curves:
                     minimum = max(
                         WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
                         max(0.0, float(dynamic['speed']))
@@ -140,7 +138,7 @@ def select_noncrossing_responses(
                     remaining = _forward_waypoints(active, dynamic, minimum)
                     if len(remaining):
                         prefix, conflict = _trim_to_safe_prefix(
-                            remaining, dynamic, static, higher_geometries,
+                            remaining, dynamic, path, higher_curves,
                             stop_clearance)
                         if conflict:
                             if prefix is None:
@@ -155,11 +153,10 @@ def select_noncrossing_responses(
                                 forced_updates.add(vehicle_id)
                                 active = prefix
                     else:
-                        old_geometry = _remaining_geometry(active, dynamic, static)
+                        old_curve = _remaining_curve(active, dynamic, path)
                         conflict = any(
-                            _boxes_intersect(old_geometry['bounds'], high['bounds'])
-                            and np.any(_overlap_matrix(old_geometry, high))
-                            for high in higher_geometries)
+                            math.isfinite(_first_curve_intersection(old_curve, high))
+                            for high in higher_curves)
                         if conflict:
                             prefix = _forward_stop_waypoint(
                                 active,
@@ -171,9 +168,9 @@ def select_noncrossing_responses(
                                 stop_fallbacks.add(vehicle_id)
                                 active = prefix
             if active is not None and len(active):
-                geometry = _remaining_geometry(active, dynamic, static)
-                if geometry is not None:
-                    higher_geometries.append(geometry)
+                curve = _remaining_curve(active, dynamic, path)
+                if len(curve) >= 2:
+                    higher_curves.append(curve)
 
     # Vehicles outside a cooperation block have no higher-priority peer.
     for vehicle_id, waypoints in candidate_waypoints.items():
@@ -248,35 +245,28 @@ def moving_waypoint_prefix(waypoints, dynamic):
 
 
 def _trim_to_safe_prefix(
-        waypoints, dynamic, static, higher_geometries, stop_clearance):
+        waypoints, dynamic, path, higher_curves, stop_clearance):
     if len(waypoints) == 0:
         return None, False
-    if not higher_geometries:
+    if not higher_curves:
         return waypoints.copy(), False
-    position = np.asarray(dynamic['position'], dtype=float)[:2]
-    points = np.vstack((position, waypoints[:, :2]))
-    waypoint_s = np.r_[0.0, np.cumsum(np.linalg.norm(
-        np.diff(points, axis=0), axis=1))]
-    low = _remaining_geometry(waypoints, dynamic, static)
-    if low is None:
+    low = _remaining_curve(waypoints, dynamic, path)
+    if len(low) < 2:
         return None, False
-    first_conflict = math.inf
-    for high in higher_geometries:
-        if not _boxes_intersect(low['bounds'], high['bounds']):
-            continue
-        overlaps = _overlap_matrix(low, high)
-        indices = np.flatnonzero(np.any(overlaps, axis=1))
-        if len(indices):
-            index = int(indices[0])
-            # Use the preceding sample as a conservative entry bound.
-            first_conflict = min(
-                first_conflict, float(low['sampleS'][max(0, index - 1)]))
+    first_conflict = min(
+        _first_curve_intersection(low, high) for high in higher_curves)
     if not math.isfinite(first_conflict):
         return waypoints.copy(), False
     safe_end = first_conflict - max(0.0, float(stop_clearance))
+    base = clean_xy(path)
+    start_s = float(project_to_polyline(dynamic['position'], base)['s'])
+    waypoint_s = np.asarray([
+        float(project_to_polyline(point, base)['s']) - start_s
+        for point in waypoints[:, :2]
+    ])
     legal = np.flatnonzero(
-        (waypoint_s[1:] <= safe_end + 1e-9)
-        & (waypoint_s[1:] > 1e-9))
+        (waypoint_s <= safe_end + 1e-9)
+        & (waypoint_s > 1e-9))
     if len(legal) == 0:
         return None, True
     prefix = waypoints[:int(legal[-1]) + 1].copy()
@@ -285,48 +275,53 @@ def _trim_to_safe_prefix(
     return prefix, True
 
 
-def _remaining_geometry(waypoints, dynamic, static):
-    path = clean_xy(np.asarray(waypoints, dtype=float)[:, :2])
-    if len(path) == 0:
-        return None
-    position = np.asarray(dynamic['position'], dtype=float)[:2]
-    if len(path) >= 2:
-        progress = project_to_polyline(position, path)['s']
-        path = slice_polyline(path, progress, arc_lengths(path)[-1])
-    if np.linalg.norm(path[0] - position) > 1e-9:
-        path = np.vstack((position, path))
-    samples = resample_polyline(path, _SAMPLE_SPACING)
-    sample_s = arc_lengths(samples)
-    if len(samples) == 1:
-        heading = float(dynamic['heading'])
-        tangents = np.asarray([[math.cos(heading), math.sin(heading)]])
-    else:
-        segments = np.diff(samples, axis=0)
-        lengths = np.linalg.norm(segments, axis=1)
-        tangents = np.vstack((
-            segments / np.maximum(lengths[:, None], 1e-12),
-            segments[-1] / max(float(lengths[-1]), 1e-12),
-        ))
-    half_length = (
-        0.5 * float(static['length'])
-        + float(dynamic.get('longitudinalUncertainty', 0.0)))
-    half_width = (
-        0.5 * float(static['width'])
-        + float(dynamic.get('lateralUncertainty', 0.0))
-        + COOPERATION_LATERAL_MARGIN)
-    radius = math.hypot(half_length, half_width)
-    return {
-        'sampleS': sample_s,
-        'centers': samples,
-        'tangents': tangents,
-        'normals': np.column_stack((-tangents[:, 1], tangents[:, 0])),
-        'halfLength': half_length,
-        'halfWidth': half_width,
-        'bounds': (np.min(samples, axis=0) - radius,
-                   np.max(samples, axis=0) + radius),
-    }
+def _remaining_curve(waypoints, dynamic, path):
+    if path is None or len(waypoints) == 0:
+        return np.empty((0, 2), dtype=float)
+    base = clean_xy(path)
+    if len(base) < 2:
+        return base
+    start = float(project_to_polyline(dynamic['position'], base)['s'])
+    end = float(project_to_polyline(waypoints[-1, :2], base)['s'])
+    return slice_polyline(base, start, end)
 
 
-def _boxes_intersect(first, second):
-    return bool(np.all(first[0] <= second[1])
-                and np.all(second[0] <= first[1]))
+def _first_curve_intersection(low, high):
+    """Arc length of the first intersection of two planned polylines."""
+    if len(low) < 2 or len(high) < 2:
+        return math.inf
+    high_start, high_end = high[:-1], high[1:]
+    high_delta = high_end - high_start
+    progress = 0.0
+    for start, end in zip(low[:-1], low[1:]):
+        delta = end - start
+        length = float(np.linalg.norm(delta))
+        if length <= 1e-9:
+            continue
+        possible = np.all(
+            np.maximum(start, end) >= np.minimum(high_start, high_end) - 1e-9,
+            axis=1) & np.all(
+            np.maximum(high_start, high_end) >= np.minimum(start, end) - 1e-9,
+            axis=1)
+        if np.any(possible):
+            edges = high_delta[possible]
+            offset = high_start[possible] - start
+            cross = delta[0] * edges[:, 1] - delta[1] * edges[:, 0]
+            side = offset[:, 0] * edges[:, 1] - offset[:, 1] * edges[:, 0]
+            other = offset[:, 0] * delta[1] - offset[:, 1] * delta[0]
+            regular = np.abs(cross) > 1e-10
+            t = np.divide(side, cross, out=np.zeros_like(side), where=regular)
+            u = np.divide(other, cross, out=np.zeros_like(other), where=regular)
+            hits = regular & (t >= -1e-9) & (t <= 1 + 1e-9) & (u >= -1e-9) & (u <= 1 + 1e-9)
+            if np.any(hits):
+                return progress + length * max(0.0, float(np.min(t[hits])))
+            collinear = ~regular & (np.abs(other) <= 1e-8)
+            if np.any(collinear):
+                starts = offset[collinear] @ delta / (length * length)
+                ends = (offset[collinear] + edges[collinear]) @ delta / (length * length)
+                entry = np.maximum(0.0, np.minimum(starts, ends))
+                exit_ = np.minimum(1.0, np.maximum(starts, ends))
+                if np.any(entry <= exit_ + 1e-9):
+                    return progress + length * float(np.min(entry[entry <= exit_ + 1e-9]))
+        progress += length
+    return math.inf

@@ -101,6 +101,7 @@ class PlanningEngine:
         self.vehicleDispatchedPathVOCaches: Dict[str, Any] = {}
         # Only for if_cross=False: exact PathVOs last issued after postprocessing.
         self.vehicleNoncrossPathVOCaches: Dict[str, Any] = {}
+        self.vehicleDispatchedCurveCaches: Dict[str, Any] = {}
         # 本帧必须重新向车端下发waypoint的车辆ID；每帧开始时清空。
         self.vehicleIdsNeedWaypointUpdate: set[str] = set()
         # 本帧空间重规划已经能够确定必须下发或必须不下发的车辆ID。
@@ -189,6 +190,7 @@ class PlanningEngine:
             self.vehicleWaypointResponseCaches.pop(vehicleId, None)
             self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
             self.vehicleNoncrossPathVOCaches.pop(vehicleId, None)
+            self.vehicleDispatchedCurveCaches.pop(vehicleId, None)
             self.vehicleRouteProgressCaches.pop(vehicleId, None)
             self.vehicleTaskCaches.pop(vehicleId, None)
             return
@@ -208,6 +210,7 @@ class PlanningEngine:
                 self.vehicleWaypointResponseCaches.pop(vehicleId, None)
                 self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
                 self.vehicleNoncrossPathVOCaches.pop(vehicleId, None)
+                self.vehicleDispatchedCurveCaches.pop(vehicleId, None)
                 self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
             self.vehicleTaskCaches[vehicleId] = {
@@ -265,6 +268,7 @@ class PlanningEngine:
         self.vehicleWaypointResponseCaches.pop(vehicleId, None)
         self.vehicleDispatchedPathVOCaches.pop(vehicleId, None)
         self.vehicleNoncrossPathVOCaches.pop(vehicleId, None)
+        self.vehicleDispatchedCurveCaches.pop(vehicleId, None)
         self.vehicleRouteProgressCaches.pop(vehicleId, None)
 
         # 调箱门修复属于局部规划上下文构建：新任务必修复，同任务仅在R点尚存时修复。
@@ -361,6 +365,7 @@ class PlanningEngine:
             self.vehicleWaypointResponseCaches,
             self.vehicleDispatchedPathVOCaches,
             self.vehicleNoncrossPathVOCaches,
+            self.vehicleDispatchedCurveCaches,
             self.vehicleObstacleCaches,
             self.hvLowSpeedFrameCaches,
             self.reversePointCaches,
@@ -1104,6 +1109,8 @@ class PlanningEngine:
                 candidate_waypoints=candidatesToIssue,
                 priority_decisions=priorityDecisions,
                 cached_responses=self.vehicleWaypointResponseCaches,
+                candidate_paths=self.vehicleBasePathCaches,
+                cached_paths=self.vehicleDispatchedCurveCaches,
                 vehicle_dynamic_info=self.vehicleDynamicInfoCaches,
                 vehicle_static_info=self.vehicleStaticInfoCaches,
                 stop_clearance=OUTPUT_CROSS_CLEARANCE_M,
@@ -1215,6 +1222,7 @@ class PlanningEngine:
             self.vehicleWaypointResponseCaches[vehicleId] = waypointResponse
             if noncrossWaypoints is not None and request.get('deviceType') == 'AGV':
                 self.vehicleNoncrossPathVOCaches[vehicleId] = deepcopy(shortPathList)
+                self.vehicleDispatchedCurveCaches[vehicleId] = responsePath.copy()
             self.vehicleDispatchedPathVOCaches[vehicleId] = tuple(
                 (
                     float(path['points'][0]['x']),
