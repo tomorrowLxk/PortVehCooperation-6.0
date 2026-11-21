@@ -11,12 +11,80 @@ from localPlanner.pathGeometry import (
 from localPlanner.waypointWholePlanner import _overlap_matrix
 from parameters import (
     COOPERATION_LATERAL_MARGIN,
+    WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
+    WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE,
+    WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE,
     WAYPOINT_OUTPUT_FORWARD_TIME,
     WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
 )
 
 
 _SAMPLE_SPACING = 2.0
+
+
+def same_noncross_response(old_paths, new_paths, old_waypoints,
+                           new_waypoints, current_position):
+    """Compare actual issued paths with the speed-planning reuse tolerances."""
+    if old_paths == new_paths:
+        return True
+    if not old_paths or not new_paths:
+        return False
+    if (len(old_paths) == len(new_paths) == 1
+            and old_waypoints is not None and new_waypoints is not None):
+        old = np.asarray(old_waypoints, dtype=float)
+        new = np.asarray(new_waypoints, dtype=float)
+        if (old.ndim == new.ndim == 2 and len(old) == len(new) == 1
+                and float(old_paths[0].get('speedLimit') or 0.0) == 0.0
+                and float(new_paths[0].get('speedLimit') or 0.0) == 0.0
+                and bool(old_paths[0].get('isFinalDestination'))
+                == bool(new_paths[0].get('isFinalDestination'))
+                and np.linalg.norm(old[0, :2] - new[0, :2])
+                <= WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE):
+            return True
+    if len(old_paths) != len(new_paths):
+        return False
+
+    position = np.asarray(current_position, dtype=float)[:2]
+    for index, (old_path, new_path) in enumerate(zip(old_paths, new_paths)):
+        if (old_path.keys() != new_path.keys()
+                or any(old_path[key] != new_path[key]
+                       for key in old_path if key != 'speedLimit')):
+            return False
+        old_speed = max(0.0, float(old_path.get('speedLimit') or 0.0))
+        new_speed = max(0.0, float(new_path.get('speedLimit') or 0.0))
+        if not (math.isfinite(old_speed) and math.isfinite(new_speed)):
+            return False
+        if (old_speed <= 1e-9) != (new_speed <= 1e-9):
+            return False
+        if old_speed <= 1e-9:
+            continue
+
+        # A segment ahead of the vehicle is not the currently executed one.
+        if index == 0:
+            points = old_path['points']
+            start = np.asarray((points[0]['x'], points[0]['y']), dtype=float)
+            end = np.asarray((points[-1]['x'], points[-1]['y']), dtype=float)
+            direction = end - start
+            length_squared = float(direction @ direction)
+            if length_squared > 1e-18:
+                progress = float((position - start) @ direction
+                                 / length_squared)
+                lateral = np.linalg.norm(
+                    position - start - np.clip(progress, 0.0, 1.0)
+                    * direction)
+                if (0.0 <= progress < 1.0
+                        and lateral <= WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE):
+                    continue
+
+        length = float(old_path.get('length') or 0.0)
+        old_time = length / old_speed
+        new_time = length / new_speed
+        if (abs(new_speed - old_speed)
+                > WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE
+                and abs(new_time - old_time)
+                > WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE):
+            return False
+    return True
 
 
 def is_current_position_stop(waypoint_whole, dynamic):

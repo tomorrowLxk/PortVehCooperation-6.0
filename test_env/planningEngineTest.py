@@ -44,6 +44,7 @@ from localPlanner.pathCollision import path_vehicle_intersects
 from localPlanner.responseCrossFilter import (
     is_current_position_stop,
     moving_waypoint_prefix,
+    same_noncross_response,
     select_noncrossing_responses,
 )
 from localPlanner.responsePlanner import build_response_path_lists
@@ -1228,8 +1229,13 @@ class PlanningEngine:
                 responseCode = (request.get('vehicleResponse') or {}).get('code')
                 if (response.get('success', True)
                         and responseCode != 'REDISPATCH'
-                        and self.vehicleNoncrossPathVOCaches.get(vehicleId)
-                        == shortPathList):
+                        and same_noncross_response(
+                            self.vehicleNoncrossPathVOCaches.get(vehicleId),
+                            shortPathList,
+                            self.vehicleWaypointResponseCaches.get(vehicleId),
+                            waypointResponse,
+                            self.vehicleDynamicInfoCaches[vehicleId][
+                                'position'])):
                     continue
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList
