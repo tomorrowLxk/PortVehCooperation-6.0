@@ -1242,7 +1242,9 @@ class PlanningEngine:
                             self.vehicleWaypointResponseCaches.get(vehicleId),
                             waypointResponse,
                             self.vehicleDynamicInfoCaches[vehicleId][
-                                'position'])):
+                                'position'],
+                            self.vehicleDispatchedCurveCaches.get(vehicleId),
+                            responsePath)):
                     continue
             response['shortPathList'] = shortPathList
             response['mergePathList'] = mergePathList

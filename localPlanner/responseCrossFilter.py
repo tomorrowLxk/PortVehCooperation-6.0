@@ -5,10 +5,12 @@ import math
 import numpy as np
 
 from localPlanner.pathGeometry import (
-    arc_lengths, clean_xy, project_to_polyline, slice_polyline,
+    arc_lengths, clean_xy, project_points_to_polyline,
+    project_to_polyline, slice_polyline,
 )
 from parameters import (
     WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
+    WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION,
     WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE,
     WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE,
     WAYPOINT_OUTPUT_FORWARD_TIME,
@@ -17,7 +19,8 @@ from parameters import (
 
 
 def same_noncross_response(old_paths, new_paths, old_waypoints,
-                           new_waypoints, current_position):
+                           new_waypoints, current_position,
+                           old_planned_path=None, new_planned_path=None):
     """Compare actual issued paths with the speed-planning reuse tolerances."""
     if old_paths == new_paths:
         return True
@@ -39,10 +42,35 @@ def same_noncross_response(old_paths, new_paths, old_waypoints,
         return False
 
     position = np.asarray(current_position, dtype=float)[:2]
+    old_curve = _remaining_curve(
+        np.asarray(old_waypoints, dtype=float),
+        {'position': position}, old_planned_path)
+    new_curve = _remaining_curve(
+        np.asarray(new_waypoints, dtype=float),
+        {'position': position}, new_planned_path)
+    if len(old_curve) < 2 or len(new_curve) < 2:
+        return False
+    tolerance = WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION
+    if (np.linalg.norm(old_curve[-1] - new_curve[-1]) > tolerance
+            or not _curves_within_distance(old_curve, new_curve, tolerance)
+            or not _curves_within_distance(new_curve, old_curve, tolerance)):
+        return False
     for index, (old_path, new_path) in enumerate(zip(old_paths, new_paths)):
         if (old_path.keys() != new_path.keys()
                 or any(old_path[key] != new_path[key]
-                       for key in old_path if key != 'speedLimit')):
+                       for key in old_path
+                       if key not in ('speedLimit', 'points', 'length'))):
+            return False
+        old_points = old_path['points']
+        new_points = new_path['points']
+        if (np.linalg.norm(np.asarray((old_points[-1]['x'], old_points[-1]['y']))
+                           - np.asarray((new_points[-1]['x'], new_points[-1]['y'])))
+                > tolerance):
+            return False
+        if index and (np.linalg.norm(
+                np.asarray((old_points[0]['x'], old_points[0]['y']))
+                - np.asarray((new_points[0]['x'], new_points[0]['y'])))
+                > tolerance):
             return False
         old_speed = max(0.0, float(old_path.get('speedLimit') or 0.0))
         new_speed = max(0.0, float(new_path.get('speedLimit') or 0.0))
@@ -53,24 +81,18 @@ def same_noncross_response(old_paths, new_paths, old_waypoints,
         if old_speed <= 1e-9:
             continue
 
-        # A segment ahead of the vehicle is not the currently executed one.
-        if index == 0:
-            points = old_path['points']
-            start = np.asarray((points[0]['x'], points[0]['y']), dtype=float)
-            end = np.asarray((points[-1]['x'], points[-1]['y']), dtype=float)
-            direction = end - start
-            length_squared = float(direction @ direction)
-            if length_squared > 1e-18:
-                progress = float((position - start) @ direction
-                                 / length_squared)
-                lateral = np.linalg.norm(
-                    position - start - np.clip(progress, 0.0, 1.0)
-                    * direction)
-                if (0.0 <= progress < 1.0
-                        and lateral <= WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE):
-                    continue
-
-        length = float(old_path.get('length') or 0.0)
+        # Compare the common remaining portion, including the first segment.
+        old_start = project_to_polyline(
+            (old_points[0]['x'], old_points[0]['y']), new_curve)['s']
+        new_start = project_to_polyline(
+            (new_points[0]['x'], new_points[0]['y']), new_curve)['s']
+        old_end = project_to_polyline(
+            (old_points[-1]['x'], old_points[-1]['y']), new_curve)['s']
+        new_end = project_to_polyline(
+            (new_points[-1]['x'], new_points[-1]['y']), new_curve)['s']
+        length = max(0.0, min(old_end, new_end) - max(old_start, new_start))
+        if length <= 1e-9:
+            continue
         old_time = length / old_speed
         new_time = length / new_speed
         if (abs(new_speed - old_speed)
@@ -79,6 +101,13 @@ def same_noncross_response(old_paths, new_paths, old_waypoints,
                 > WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE):
             return False
     return True
+
+
+def _curves_within_distance(source, target, tolerance):
+    samples = np.vstack((source, (source[:-1] + source[1:]) / 2.0))
+    return bool(np.all(
+        project_points_to_polyline(samples, target)['distance']
+        <= tolerance + 1e-9))
 
 
 def is_current_position_stop(waypoint_whole, dynamic):
