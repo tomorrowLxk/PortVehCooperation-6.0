@@ -23,13 +23,13 @@ PRINT_FULL_RESPONSES = False
 
 
 # 一、读取单一JSON所描述的全部测试输入并初始化长期对象。
-scenario = load_scenario(r'G:\项目\港口车辆运动规划\PortVehCooperation 6.0\test_env\demo\scenario51.json')
+scenario = load_scenario(r'G:\项目\港口车辆运动规划\PortVehCooperation 6.0\test_env\demo\scenario102_1.json')
 planningEngine = PlanningEngine(
     scenario.centerlineDict,
     scenario.connectorDict,
     scenario.mapVersion,
 )
-
+planningEngine.ifCross = False  # 改为 True 即允许交叉
 
 vehicles = create_vehicles(scenario)
 signalController = SignalController(scenario.laneSignals)
@@ -100,6 +100,7 @@ for stepIndex in range(maxSteps):
             vehicles[vehicleId].apply_response(
                 response,
                 planningEngine.vehicleBasePathCaches[vehicleId],
+                allow_zero_speed_single_point=not planningEngine.ifCross,
             )
         if PRINT_COOPERATION_BLOCKS:
             print('  cooperationBlocks (high -> low priority):')

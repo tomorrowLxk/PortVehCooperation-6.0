@@ -218,6 +218,7 @@ class VehicleSimulator:
         self.route = np.asarray(route, dtype=float)[:, :2]
         self.length = float(static_info['boundingBox']['length']) / 100.0
         self.width = float(static_info['boundingBox']['width']) / 100.0
+        self.maxSpeed = max(0.0, float(static_info['kinematics']['maxSpeed']))
         self.dt = float(simulation_dt)
         initial = np.asarray(static_info['_initialPosition'], dtype=float)
         self.x = float(initial[0])
@@ -248,7 +249,8 @@ class VehicleSimulator:
             'direction': 1,
         }
 
-    def apply_response(self, response, future_path):
+    def apply_response(self, response, future_path, *,
+                       allow_zero_speed_single_point=False):
         waypointPoints = []
         intervalSpeeds = []
         singlePointCommandSpeed = 0.0
@@ -294,7 +296,9 @@ class VehicleSimulator:
             return
 
         waypointPoints = np.asarray(waypointPoints, dtype=float)
-        if firstCommandSpeed <= 1e-9:
+        if firstCommandSpeed <= 1e-9 and (
+                len(waypointPoints) > 1
+                or not allow_zero_speed_single_point):
             self._stop_at_current_position()
             return
         if len(waypointPoints) == 1:
@@ -313,12 +317,17 @@ class VehicleSimulator:
                     or float(targetOffset @ headingVector) <= 1e-6):
                 self._stop_at_current_position()
                 return
-            previousSpeed = (
-                float(np.max(self.segmentSpeeds))
-                if len(self.segmentSpeeds) else 0.0
-            )
-            approachSpeed = max(
-                0.0, self.speed, previousSpeed, singlePointCommandSpeed)
+            # A single P→P zero-speed PathVO marks a reachable stop point.
+            # Its zero speed applies at the point, not on the approach to it.
+            if allow_zero_speed_single_point:
+                approachSpeed = min(self.maxSpeed, max(self.speed, 1.0))
+            else:
+                previousSpeed = (
+                    float(np.max(self.segmentSpeeds))
+                    if len(self.segmentSpeeds) else 0.0
+                )
+                approachSpeed = max(0.0, self.speed, previousSpeed,
+                                    singlePointCommandSpeed)
             if approachSpeed <= 1e-9:
                 self._stop_at_current_position()
                 return
