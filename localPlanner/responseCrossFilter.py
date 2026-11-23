@@ -9,10 +9,10 @@ from localPlanner.pathGeometry import (
     project_to_polyline, slice_polyline,
 )
 from parameters import (
-    WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE,
-    WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION,
-    WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE,
-    WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE,
+    NONCROSS_RESPONSE_REUSE_MAX_LENGTH_DIFFERENCE,
+    NONCROSS_RESPONSE_REUSE_MAX_SPATIAL_DEVIATION,
+    NONCROSS_RESPONSE_REUSE_MAX_SPEED_DIFFERENCE,
+    NONCROSS_RESPONSE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE,
     WAYPOINT_OUTPUT_FORWARD_TIME,
     WAYPOINT_OUTPUT_MIN_FORWARD_DISTANCE,
 )
@@ -21,7 +21,7 @@ from parameters import (
 def same_noncross_response(old_paths, new_paths, old_waypoints,
                            new_waypoints, current_position,
                            old_planned_path=None, new_planned_path=None):
-    """Compare actual issued paths with the speed-planning reuse tolerances."""
+    """Compare actual issued paths with the noncrossing output tolerances."""
     if old_paths == new_paths:
         return True
     if not old_paths or not new_paths:
@@ -36,7 +36,7 @@ def same_noncross_response(old_paths, new_paths, old_waypoints,
                 and bool(old_paths[0].get('isFinalDestination'))
                 == bool(new_paths[0].get('isFinalDestination'))
                 and np.linalg.norm(old[0, :2] - new[0, :2])
-                <= WAYPOINT_WHOLE_REUSE_MAX_LENGTH_DIFFERENCE):
+                <= NONCROSS_RESPONSE_REUSE_MAX_LENGTH_DIFFERENCE):
             return True
     if len(old_paths) != len(new_paths):
         return False
@@ -50,7 +50,7 @@ def same_noncross_response(old_paths, new_paths, old_waypoints,
         {'position': position}, new_planned_path)
     if len(old_curve) < 2 or len(new_curve) < 2:
         return False
-    tolerance = WAYPOINT_WHOLE_REUSE_MAX_SPATIAL_DEVIATION
+    tolerance = NONCROSS_RESPONSE_REUSE_MAX_SPATIAL_DEVIATION
     if (np.linalg.norm(old_curve[-1] - new_curve[-1]) > tolerance
             or not _curves_within_distance(old_curve, new_curve, tolerance)
             or not _curves_within_distance(new_curve, old_curve, tolerance)):
@@ -96,9 +96,9 @@ def same_noncross_response(old_paths, new_paths, old_waypoints,
         old_time = length / old_speed
         new_time = length / new_speed
         if (abs(new_speed - old_speed)
-                > WAYPOINT_WHOLE_REUSE_MAX_SPEED_DIFFERENCE
+                > NONCROSS_RESPONSE_REUSE_MAX_SPEED_DIFFERENCE
                 and abs(new_time - old_time)
-                > WAYPOINT_WHOLE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE):
+                > NONCROSS_RESPONSE_REUSE_MAX_SEGMENT_TIME_DIFFERENCE):
             return False
     return True
 
