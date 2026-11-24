@@ -157,6 +157,8 @@ class _LineMetric:
     @classmethod
     def from_line(cls, line):
         points = clean_xy(line)
+        if len(points) == 0:
+            raise ValueError("_LineMetric requires at least one valid point")
         segments = np.diff(points, axis=0)
         segment_lengths = np.linalg.norm(segments, axis=1)
         arc = np.concatenate(([0.0], np.cumsum(segment_lengths)))
@@ -170,6 +172,9 @@ class _LineMetric:
     def values_at(self, values):
         targets = np.clip(
             np.asarray(values, dtype=float), 0.0, self.arc[-1])
+        if len(self.points) == 1:
+            return (np.repeat(self.points, len(targets), axis=0),
+                    np.full(len(targets), np.nan))
         indices = np.minimum(
             np.searchsorted(self.arc, targets, side="right") - 1,
             len(self.points) - 2,
@@ -189,6 +194,16 @@ class _LineMetric:
 
     def project_many(self, query_points):
         queries = np.asarray(query_points, dtype=float).reshape(-1, 2)
+        if len(self.points) == 1:
+            count = len(queries)
+            return {
+                "s": np.zeros(count),
+                "d": np.full(count, np.nan),
+                "distance": np.linalg.norm(queries - self.points[0], axis=1),
+                "point": np.repeat(self.points, count, axis=0),
+                "tangent": np.full((count, 2), np.nan),
+                "segmentIndex": np.full(count, -1, dtype=int),
+            }
         lengths_squared = self.segmentLengths * self.segmentLengths
         residuals = queries[:, None, :] - self.points[:-1][None, :, :]
         ratios = np.divide(
@@ -252,6 +267,8 @@ class _LineMetric:
         span = end_s - start_s
         if span <= 1e-9:
             return clean_xy(np.vstack((first, last)))
+        if len(self.points) == 1:
+            raise ValueError("Frenet connector requires a line direction")
 
         curvature_step = max(0.1, min(float(spacing), 0.5))
         lower_start = max(0.0, start_s - curvature_step)
