@@ -53,6 +53,7 @@ WAYPOINT_MANDATORY_MIN_FORWARD_SPACING = 1.0  # 移动后的进口必经点与�
 SIMULATION_SHORT_PATH_POINT_SPACING = 4.0  # Simulation output densification spacing, m
 DRIVABLE_LINE_JOIN_TOLERANCE = 0.1  # Drivable-line lane-junction merge distance, m
 OUTPUT_CROSS_CLEARANCE_M = 6.0  # Minimum stop clearance for noncrossing output, in meters.
+NONCROSS_CURVE_PROXIMITY_M = 3.0  # 非交叉下发曲线采样点的接近距离，单位m
 NONCROSS_RESPONSE_REUSE_MAX_LENGTH_DIFFERENCE = 10.0  # 单点零速停车指令允许复用的最大点位差，单位m
 NONCROSS_RESPONSE_REUSE_MAX_SPATIAL_DEVIATION = 4.0  # 非交叉后处理新旧下发路径允许复用的最大空间偏离，单位m
 NONCROSS_RESPONSE_REUSE_MAX_SPEED_DIFFERENCE = 1.0  # 非交叉后处理新旧下发段允许复用的最大速度差，单位m/s

@@ -9,6 +9,7 @@ from localPlanner.pathGeometry import (
     project_to_polyline, slice_polyline,
 )
 from parameters import (
+    NONCROSS_CURVE_PROXIMITY_M,
     NONCROSS_RESPONSE_REUSE_MAX_LENGTH_DIFFERENCE,
     NONCROSS_RESPONSE_REUSE_MAX_SPATIAL_DEVIATION,
     NONCROSS_RESPONSE_REUSE_MAX_SPEED_DIFFERENCE,
@@ -184,7 +185,7 @@ def select_noncrossing_responses(
                     else:
                         old_curve = _remaining_curve(active, dynamic, path)
                         conflict = any(
-                            math.isfinite(_first_curve_intersection(old_curve, high))
+                            math.isfinite(_first_curve_proximity(old_curve, high))
                             for high in higher_curves)
                         if conflict:
                             prefix = _forward_stop_waypoint(
@@ -283,7 +284,7 @@ def _trim_to_safe_prefix(
     if len(low) < 2:
         return None, False
     first_conflict = min(
-        _first_curve_intersection(low, high) for high in higher_curves)
+        _first_curve_proximity(low, high) for high in higher_curves)
     if not math.isfinite(first_conflict):
         return waypoints.copy(), False
     safe_end = first_conflict - max(0.0, float(stop_clearance))
@@ -315,42 +316,19 @@ def _remaining_curve(waypoints, dynamic, path):
     return slice_polyline(base, start, end)
 
 
-def _first_curve_intersection(low, high):
-    """Arc length of the first intersection of two planned polylines."""
+def _first_curve_proximity(low, high):
+    """Arc length of the first low-curve sample near a high-curve sample."""
     if len(low) < 2 or len(high) < 2:
         return math.inf
-    high_start, high_end = high[:-1], high[1:]
-    high_delta = high_end - high_start
-    progress = 0.0
-    for start, end in zip(low[:-1], low[1:]):
-        delta = end - start
-        length = float(np.linalg.norm(delta))
-        if length <= 1e-9:
+    threshold = NONCROSS_CURVE_PROXIMITY_M
+    threshold_sq = threshold * threshold
+    high_min = np.min(high, axis=0) - threshold
+    high_max = np.max(high, axis=0) + threshold
+    progress = arc_lengths(low)
+    for index, point in enumerate(low):
+        if np.any(point < high_min) or np.any(point > high_max):
             continue
-        possible = np.all(
-            np.maximum(start, end) >= np.minimum(high_start, high_end) - 1e-9,
-            axis=1) & np.all(
-            np.maximum(high_start, high_end) >= np.minimum(start, end) - 1e-9,
-            axis=1)
-        if np.any(possible):
-            edges = high_delta[possible]
-            offset = high_start[possible] - start
-            cross = delta[0] * edges[:, 1] - delta[1] * edges[:, 0]
-            side = offset[:, 0] * edges[:, 1] - offset[:, 1] * edges[:, 0]
-            other = offset[:, 0] * delta[1] - offset[:, 1] * delta[0]
-            regular = np.abs(cross) > 1e-10
-            t = np.divide(side, cross, out=np.zeros_like(side), where=regular)
-            u = np.divide(other, cross, out=np.zeros_like(other), where=regular)
-            hits = regular & (t >= -1e-9) & (t <= 1 + 1e-9) & (u >= -1e-9) & (u <= 1 + 1e-9)
-            if np.any(hits):
-                return progress + length * max(0.0, float(np.min(t[hits])))
-            collinear = ~regular & (np.abs(other) <= 1e-8)
-            if np.any(collinear):
-                starts = offset[collinear] @ delta / (length * length)
-                ends = (offset[collinear] + edges[collinear]) @ delta / (length * length)
-                entry = np.maximum(0.0, np.minimum(starts, ends))
-                exit_ = np.minimum(1.0, np.maximum(starts, ends))
-                if np.any(entry <= exit_ + 1e-9):
-                    return progress + length * float(np.min(entry[entry <= exit_ + 1e-9]))
-        progress += length
+        delta = high - point
+        if np.any(np.sum(delta * delta, axis=1) < threshold_sq):
+            return float(progress[index])
     return math.inf
