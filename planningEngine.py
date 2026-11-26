@@ -1070,6 +1070,19 @@ class PlanningEngine:
         noncrossWaypoints = None
         if not if_cross:
             forcedNoncrossUpdates = set()
+            mustDispatchFallbacks = {}
+            for request in requests:
+                vehicleId = str(request.get('deviceId'))
+                if (request.get('deviceType') != 'AGV'
+                        or vehicleId not in self.vehicleIdsMustDispatch
+                        or vehicleId not in self.vehicleIdsNeedWaypointUpdate
+                        or vehicleId in self.finalDestinationVehicleIds):
+                    continue
+                sparse = waypointSparseResults.get(vehicleId)
+                if sparse is not None and len(sparse):
+                    fallback = sparse[:1].copy()
+                    fallback[0, 3:] = 0.0
+                    mustDispatchFallbacks[vehicleId] = fallback
             candidatesToIssue = {
                 str(request.get('deviceId')): waypointSparseResults[
                     str(request.get('deviceId'))]
@@ -1116,6 +1129,10 @@ class PlanningEngine:
                 stop_clearance=OUTPUT_CROSS_CLEARANCE_M,
                 fallback_waypoints=reachableWaypoints,
             )
+            for vehicleId, fallback in mustDispatchFallbacks.items():
+                if (vehicleId not in candidatesToIssue
+                        or noncrossWaypoints.get(vehicleId) is None):
+                    noncrossWaypoints[vehicleId] = fallback
         for requestIndex, request in enumerate(requests):
             vehicleId = str(request.get('deviceId'))
             if vehicleId in self.finalDestinationVehicleIds:
@@ -1171,15 +1188,31 @@ class PlanningEngine:
                             break
                         allowed += 1
                     if allowed == 0:
-                        continue
-                    moving = np.flatnonzero(
-                        np.linalg.norm(
-                            np.diff(waypointResponse[:, :2], axis=0),
-                            axis=1) > 1e-9)
-                    waypointResponse = waypointResponse[
-                        :int(moving[allowed - 1]) + 2].copy()
-                    shortPathList = shortPathList[:allowed]
-                    mergePathList = mergePathList[:allowed]
+                        fallback = mustDispatchFallbacks.get(vehicleId)
+                        if fallback is None:
+                            continue
+                        waypointResponse = fallback.copy()
+                        shortPathList, mergePathList = build_response_path_lists(
+                            waypoints=waypointResponse,
+                            planned_path=responsePath,
+                            centerline_dict=responseCenterlines,
+                            connector_dict=responseConnectors,
+                            lane_ids=responseLaneIds,
+                            junction_lane_ids=responseJunctionLaneIds,
+                            full_path_list=response.get('fullPathList') or (),
+                            request=request,
+                            base_candidates=(
+                                self.vehicleBaseWaypointCandidateCaches.get(vehicleId)),
+                        )
+                    else:
+                        moving = np.flatnonzero(
+                            np.linalg.norm(
+                                np.diff(waypointResponse[:, :2], axis=0),
+                                axis=1) > 1e-9)
+                        waypointResponse = waypointResponse[
+                            :int(moving[allowed - 1]) + 2].copy()
+                        shortPathList = shortPathList[:allowed]
+                        mergePathList = mergePathList[:allowed]
                 goal = (request.get('endPosition') or {}).get('position')
                 lastPoint = (
                     shortPathList[-1]['points'][-1]
